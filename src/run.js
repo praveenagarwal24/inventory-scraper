@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import puppeteer from 'puppeteer';
 
 // ---------------------------------------------------------------- config
@@ -26,7 +27,8 @@ const CFG = {
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
   runSecret:    env('RUN_SECRET') || '',
   timezone:     env('TIMEZONE') || 'America/New_York',
-  concurrency:  int(env('CONCURRENCY'), 6),
+  concurrency:  int(env('CONCURRENCY'), 5),
+  stagger:      int(env('STAGGER_MS'), 700),    // spread out site starts
   siteTimeout:  int(env('SITE_TIMEOUT_MS'), 5 * 60 * 1000),
   navTimeout:   int(env('NAV_TIMEOUT_MS'), 45 * 1000),
   idleGrace:    int(env('IDLE_GRACE_MS'), 15 * 1000),  // quiet time before we call it done
@@ -238,6 +240,10 @@ async function scrapeOne(browser, site, scriptText) {
     if (proxy && proxy.username) await page.authenticate({ username: proxy.username, password: proxy.password });
     await page.setViewport({ width: 1440, height: 900 });
     await page.setUserAgent(UA);
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Upgrade-Insecure-Requests': '1',
+    });
     await page.evaluateOnNewDocument(SHIM);
 
     page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 200)));
@@ -279,8 +285,10 @@ async function scrapeOne(browser, site, scriptText) {
     }
 
     const resp = await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
-    if (resp && resp.status() >= 400) {
-      throw new Error(`Site returned HTTP ${resp.status()} on load (blocked or geo-restricted?)`);
+    const loadStatus = resp ? resp.status() : 0;
+    if (loadStatus >= 400) {
+      // Not fatal. The landing page may be challenged while the APIs still answer.
+      console.warn(`  note  ${site.url} loaded with HTTP ${loadStatus}; continuing anyway`);
     }
     await page.waitForNetworkIdle({ idleTime: 1000, timeout: 8000 }).catch(() => {});
 
@@ -321,8 +329,9 @@ async function scrapeOne(browser, site, scriptText) {
     }
 
     const why = evalDone ? 'script finished but produced no CSV' : 'script never finished';
+    const blocked = loadStatus >= 400 ? ` | page load was HTTP ${loadStatus}, likely bot/geo block` : '';
     const hint = pageErrors.length ? ` | page errors: ${pageErrors.slice(-2).join(' ; ')}` : '';
-    throw new Error(`${why} after ${Math.round((Date.now() - t0) / 1000)}s${hint}`);
+    throw new Error(`${why} after ${Math.round((Date.now() - t0) / 1000)}s${blocked}${hint}`);
   } finally {
     await page.close().catch(() => {});
     await context.close().catch(() => {});
@@ -338,24 +347,45 @@ function defaultName(site) {
 
 // ---------------------------------------------------------------- upload
 
+async function postToWebApp(payload, tries = 3) {
+  let last = '';
+  for (let i = 1; i <= tries; i++) {
+    try {
+      const res = await fetch(CFG.appsScriptUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        redirect: 'follow',
+      });
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        if (json.ok) return json;
+        last = json.error || 'web app returned ok:false';
+        // A rejected secret will never succeed; do not burn retries on it.
+        if (/secret/i.test(last)) throw new Error(last);
+      } catch (parseErr) {
+        if (parseErr.message === last) throw parseErr;
+        last = `non-JSON reply (${text.slice(0, 80).replace(/\s+/g, ' ')})`;
+      }
+    } catch (e) {
+      if (/secret/i.test(e.message)) throw e;
+      last = e.message;
+    }
+    if (i < tries) await sleep(i * 2500);
+  }
+  throw new Error(last);
+}
+
 async function upload(fileName, csv, siteUrl, dataRows) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return { ok: true, skipped: true };
   const b64 = Buffer.from(csv, 'utf8').toString('base64');
   if (b64.length > 45 * 1024 * 1024) throw new Error('CSV too large for the web app (>45MB encoded)');
 
-  const res = await fetch(CFG.appsScriptUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      secret: CFG.runSecret, action: 'file', date: RUN_DATE,
-      fileName, csvB64: b64, site: siteUrl, rows: dataRows,
-    }),
-    redirect: 'follow',
+  return postToWebApp({
+    secret: CFG.runSecret, action: 'file', date: RUN_DATE,
+    fileName, csvB64: b64, site: siteUrl, rows: dataRows,
   });
-  const text = await res.text();
-  let json; try { json = JSON.parse(text); } catch { throw new Error(`Bad web app reply: ${text.slice(0, 200)}`); }
-  if (!json.ok) throw new Error(json.error || 'Web app rejected the upload');
-  return json;
 }
 
 async function postLog(results) {
@@ -375,14 +405,7 @@ async function postLog(results) {
 async function fetchDoneSites() {
   if (!CFG.skipExisting || CFG.dryRun || !CFG.appsScriptUrl) return new Set();
   try {
-    const res = await fetch(CFG.appsScriptUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret: CFG.runSecret, action: 'manifest', date: RUN_DATE }),
-      redirect: 'follow',
-    });
-    const j = JSON.parse(await res.text());
-    if (!j.ok) { console.warn(`Manifest lookup failed: ${j.error}. Processing everything.`); return new Set(); }
+    const j = await postToWebApp({ secret: CFG.runSecret, action: 'manifest', date: RUN_DATE });
     return new Set(j.done || []);
   } catch (e) {
     console.warn(`Manifest lookup failed: ${e.message}. Processing everything.`);
@@ -458,16 +481,31 @@ async function main() {
 
   const started = Date.now();
   const used = new Set();
+  const seenHashes = new Map();   // csv sha1 -> filename already uploaded this run
+  let launched = 0;
 
   const results = await pool(rows, CFG.concurrency, async (site) => {
     const label = site.name || site.url;
     if (CFG.maxMinutes && Date.now() - started > CFG.maxMinutes * 60000) {
       return { url: site.url, status: 'skipped', error: 'time budget reached; will resume next run' };
     }
+    if (CFG.stagger) await sleep((launched++ % CFG.concurrency) * CFG.stagger);
+
     for (let attempt = 1; attempt <= CFG.attempts; attempt++) {
       try {
         const script = await fetchScript(site.scriptLink);
         const { name, csv, via, secs } = await scrapeOne(browser, site, script);
+
+        const dataRows = Math.max(0, csv.trim().split('\n').length - 1);
+        const hash = crypto.createHash('sha1').update(csv).digest('hex');
+
+        // Two sheet rows can point at the same dealer (alias domains, or the same
+        // script listed twice). Identical content goes to Drive once, not twice.
+        if (seenHashes.has(hash)) {
+          const twin = seenHashes.get(hash);
+          console.log(`DUP   ${label} -> identical to ${twin}, not uploaded again`);
+          return { url: site.url, status: 'duplicate', rows: dataRows, fileName: twin, secs };
+        }
 
         let fileName = name || defaultName(site);
         if (used.has(fileName)) {
@@ -475,8 +513,8 @@ async function main() {
           fileName = `${fileName.slice(0, -ext.length)}_${site.rowNumber}${ext}`;
         }
         used.add(fileName);
+        seenHashes.set(hash, fileName);
 
-        const dataRows = Math.max(0, csv.trim().split('\n').length - 1);
         await fsp.writeFile(path.join(CFG.outDir, fileName), csv, 'utf8');
         await upload(fileName, csv, site.url, dataRows);
         console.log(`OK    ${label} -> ${fileName} (${dataRows} rows, ${secs}s, ${via})`);
@@ -488,7 +526,7 @@ async function main() {
           return { url: site.url, status: 'failed', error: msg };
         }
         console.warn(`retry ${label} (attempt ${attempt}): ${msg}`);
-        await sleep(3000);
+        await sleep(8000 * attempt);
       }
     }
   });
@@ -497,10 +535,12 @@ async function main() {
   await postLog(results);
 
   const ok = results.filter((r) => r.status === 'ok');
+  const dup = results.filter((r) => r.status === 'duplicate');
   const skipped = results.filter((r) => r.status === 'skipped');
   const bad = results.filter((r) => r.status === 'failed');
   console.log(
     `\n${ok.length} succeeded, ${bad.length} failed` +
+    `${dup.length ? `, ${dup.length} duplicate` : ''}` +
     `${skipped.length ? `, ${skipped.length} deferred to next run` : ''}` +
     ` in ${Math.round((Date.now() - started) / 1000)}s.`
   );
