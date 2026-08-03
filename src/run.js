@@ -27,11 +27,11 @@ const CFG = {
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
   runSecret:    env('RUN_SECRET') || '',
   timezone:     env('TIMEZONE') || 'America/New_York',
-  concurrency:  int(env('CONCURRENCY'), 5),
-  stagger:      int(env('STAGGER_MS'), 700),    // spread out site starts
-  siteTimeout:  int(env('SITE_TIMEOUT_MS'), 5 * 60 * 1000),
+  concurrency:  int(env('CONCURRENCY'), 8),
+  stagger:      int(env('STAGGER_MS'), 400),    // spread out the FIRST batch only
+  siteTimeout:  int(env('SITE_TIMEOUT_MS'), 150 * 1000),
   navTimeout:   int(env('NAV_TIMEOUT_MS'), 45 * 1000),
-  idleGrace:    int(env('IDLE_GRACE_MS'), 15 * 1000),  // quiet time before we call it done
+  idleGrace:    int(env('IDLE_GRACE_MS'), 8 * 1000),   // quiet time before we call it done
   attempts:     int(env('ATTEMPTS'), 2),
   blockAssets:  env('BLOCK_ASSETS') !== '0',
   skipExisting: env('SKIP_EXISTING') !== '0',   // skip sites already in Drive for today
@@ -290,7 +290,7 @@ async function scrapeOne(browser, site, scriptText) {
       // Not fatal. The landing page may be challenged while the APIs still answer.
       console.warn(`  note  ${site.url} loaded with HTTP ${loadStatus}; continuing anyway`);
     }
-    await page.waitForNetworkIdle({ idleTime: 1000, timeout: 8000 }).catch(() => {});
+    await page.waitForNetworkIdle({ idleTime: 800, timeout: 3000 }).catch(() => {});
 
     // Kick the script off. We do not block on it: the download landing on disk is the
     // real completion signal, and not every script resolves cleanly.
@@ -303,7 +303,11 @@ async function scrapeOne(browser, site, scriptText) {
         const csv = await fsp.readFile(hit.file, 'utf8');
         return { name: hit.name, csv, via: 'download', secs: Math.round((Date.now() - t0) / 1000) };
       }
-      if (evalError) throw new Error(`Script threw: ${evalError.message || evalError}`);
+      if (evalError) {
+        const e = new Error(`Script threw: ${evalError.message || evalError}`);
+        if (loadStatus >= 400) e.blocked = true;
+        throw e;
+      }
 
       // Fast fail: script finished AND the network has gone quiet, but no file appeared.
       // Waiting out the full timeout here is what used to make bad sites cost 6 minutes.
@@ -331,7 +335,9 @@ async function scrapeOne(browser, site, scriptText) {
     const why = evalDone ? 'script finished but produced no CSV' : 'script never finished';
     const blocked = loadStatus >= 400 ? ` | page load was HTTP ${loadStatus}, likely bot/geo block` : '';
     const hint = pageErrors.length ? ` | page errors: ${pageErrors.slice(-2).join(' ; ')}` : '';
-    throw new Error(`${why} after ${Math.round((Date.now() - t0) / 1000)}s${blocked}${hint}`);
+    const err = new Error(`${why} after ${Math.round((Date.now() - t0) / 1000)}s${blocked}${hint}`);
+    if (loadStatus >= 400) err.blocked = true;
+    throw err;
   } finally {
     await page.close().catch(() => {});
     await context.close().catch(() => {});
@@ -428,6 +434,16 @@ async function main() {
   await fsp.mkdir(CFG.outDir, { recursive: true });
   console.log(`Run date ${RUN_DATE} (${CFG.timezone})`);
 
+  // Apps Script cold-starts in ~30s. Launch Chrome while we wait rather than after.
+  const browserPromise = puppeteer.launch({
+    headless: 'new',
+    protocolTimeout: CFG.siteTimeout + 120000,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled', '--window-size=1440,900',
+    ],
+  });
+
   let rows = await loadRows();
   console.log(`Sheet returned ${rows.length} usable row(s)`);
 
@@ -470,15 +486,15 @@ async function main() {
     `${CFG.proxyUrl ? ', proxy on' : ''}\n`
   );
 
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    protocolTimeout: CFG.siteTimeout + 120000,
-    args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled', '--window-size=1440,900',
-    ],
+  // Pull every scraper script up front, 15 at a time. Doing this inside the worker
+  // pool meant each fetch occupied a scraping slot for no reason.
+  const preT = Date.now();
+  await pool(rows, 15, async (site) => {
+    try { await fetchScript(site.scriptLink); } catch (e) { /* surfaced later per-site */ }
   });
+  console.log(`Prefetched ${scriptCache.size} script(s) in ${Math.round((Date.now() - preT) / 1000)}s\n`);
 
+  const browser = await browserPromise;
   const started = Date.now();
   const used = new Set();
   const seenHashes = new Map();   // csv sha1 -> filename already uploaded this run
@@ -489,7 +505,7 @@ async function main() {
     if (CFG.maxMinutes && Date.now() - started > CFG.maxMinutes * 60000) {
       return { url: site.url, status: 'skipped', error: 'time budget reached; will resume next run' };
     }
-    if (CFG.stagger) await sleep((launched++ % CFG.concurrency) * CFG.stagger);
+    if (CFG.stagger && launched < CFG.concurrency) await sleep(launched++ * CFG.stagger);
 
     for (let attempt = 1; attempt <= CFG.attempts; attempt++) {
       try {
@@ -517,10 +533,17 @@ async function main() {
 
         await fsp.writeFile(path.join(CFG.outDir, fileName), csv, 'utf8');
         await upload(fileName, csv, site.url, dataRows);
-        console.log(`OK    ${label} -> ${fileName} (${dataRows} rows, ${secs}s, ${via})`);
+        const tag = dataRows === 0 ? 'EMPTY' : 'OK   ';
+        console.log(`${tag} ${label} -> ${fileName} (${dataRows} rows, ${secs}s, ${via})`);
         return { url: site.url, status: 'ok', rows: dataRows, fileName, secs, via };
       } catch (err) {
         const msg = err.message || String(err);
+        if (err.blocked) {
+          // The site refused us at the network layer. A second identical attempt
+          // from the same IP will be refused too - do not pay the timeout twice.
+          console.error(`FAIL  ${label} -> ${msg}`);
+          return { url: site.url, status: 'failed', error: msg, blocked: true };
+        }
         if (attempt === CFG.attempts) {
           console.error(`FAIL  ${label} -> ${msg}`);
           return { url: site.url, status: 'failed', error: msg };
@@ -544,9 +567,19 @@ async function main() {
     `${skipped.length ? `, ${skipped.length} deferred to next run` : ''}` +
     ` in ${Math.round((Date.now() - started) / 1000)}s.`
   );
+  const empty = ok.filter((r) => r.rows === 0);
+  if (empty.length) {
+    console.log(`\nProduced an empty CSV (${empty.length}) - worth checking these scripts:`);
+    empty.forEach((r) => console.log(`  ${r.url}`));
+  }
   if (bad.length) {
+    const blocked = bad.filter((r) => r.blocked);
     console.log('\nFailures:');
     bad.forEach((r) => console.log(`  ${r.url}\n    ${r.error}`));
+    if (blocked.length) {
+      console.log(`\n${blocked.length} of those look like IP-level blocks. A proxy or a`);
+      console.log('self-hosted runner is the fix for those, not more retries.');
+    }
   }
 
   if (process.env.GITHUB_STEP_SUMMARY) {
