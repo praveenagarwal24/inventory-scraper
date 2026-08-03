@@ -52,7 +52,7 @@ jobs:
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
-          CONCURRENCY:      '6'
+          CONCURRENCY:      '5'
           SITE_TIMEOUT_MS:  '300000'
           IDLE_GRACE_MS:    '15000'
           BLOCK_ASSETS:     '1'
