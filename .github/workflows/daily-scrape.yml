@@ -11,9 +11,14 @@ on:
         required: false
         default: ''
       limit:
-        description: 'Stop after this many sites, e.g. 5 (blank = no cap)'
+        description: 'Process only this many pending sites, e.g. 5 (blank = all)'
         required: false
         default: ''
+      force:
+        description: 'Re-scrape sites that already have a file in Drive today'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   scrape:
@@ -47,10 +52,15 @@ jobs:
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
-          CONCURRENCY:      '3'
-          SITE_TIMEOUT_MS:  '360000'
+          CONCURRENCY:      '6'
+          SITE_TIMEOUT_MS:  '300000'
+          IDLE_GRACE_MS:    '15000'
+          BLOCK_ASSETS:     '1'
+          # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
           ONLY:             ${{ github.event.inputs.only }}
           LIMIT:            ${{ github.event.inputs.limit }}
+          SKIP_EXISTING:    ${{ github.event.inputs.force == 'true' && '0' || '1' }}
+          MAX_MINUTES:      '0'
         run: node src/run.js
 
       - name: Keep a copy of the CSVs for debugging
