@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: 'Only run sites whose URL contains this text (optional)'
+        description: 'Comma-separated text to match against site URLs, e.g. twinpineford,bobsford (blank = all)'
+        required: false
+        default: ''
+      limit:
+        description: 'Stop after this many sites, e.g. 5 (blank = no cap)'
         required: false
         default: ''
 
@@ -24,7 +28,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Cache Chrome
         uses: actions/cache@v4
@@ -46,6 +50,7 @@ jobs:
           CONCURRENCY:      '3'
           SITE_TIMEOUT_MS:  '360000'
           ONLY:             ${{ github.event.inputs.only }}
+          LIMIT:            ${{ github.event.inputs.limit }}
         run: node src/run.js
 
       - name: Keep a copy of the CSVs for debugging
