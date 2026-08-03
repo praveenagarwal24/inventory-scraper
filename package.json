@@ -1,0 +1,12 @@
+{
+  "name": "inventory-scrape-runner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/run.js",
+    "dry": "DRY_RUN=1 node src/run.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}

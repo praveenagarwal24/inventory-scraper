@@ -1,0 +1,58 @@
+name: Daily inventory scrape
+
+on:
+  schedule:
+    # 09:00 UTC = 5am ET (summer) / 4am ET (winter). Cron is always UTC.
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Only run sites whose URL contains this text (optional)'
+        required: false
+        default: ''
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    concurrency:
+      group: daily-scrape
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Chrome
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package.json') }}
+
+      - run: npm install
+
+      - name: Run scrapers
+        env:
+          SHEET_ID:         ${{ secrets.SHEET_ID }}
+          SHEET_TAB:        Main
+          URL_COL:          L
+          SCRIPT_COL:       M
+          APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:       ${{ secrets.RUN_SECRET }}
+          TIMEZONE:         America/New_York
+          CONCURRENCY:      '3'
+          SITE_TIMEOUT_MS:  '360000'
+          ONLY:             ${{ github.event.inputs.only }}
+        run: node src/run.js
+
+      - name: Keep a copy of the CSVs for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: csvs-${{ github.run_number }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
