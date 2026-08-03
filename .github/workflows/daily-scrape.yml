@@ -2,8 +2,9 @@ name: Daily inventory scrape
 
 on:
   schedule:
-    # 09:00 UTC = 5am ET (summer) / 4am ET (winter). Cron is always UTC.
-    - cron: '0 9 * * *'
+    # 12:00 UTC = 17:30 IST, Monday to Friday.
+    # Cron is always UTC and India has no DST, so this never drifts.
+    - cron: '0 12 * * 1-5'
   workflow_dispatch:
     inputs:
       only:
