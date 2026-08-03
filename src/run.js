@@ -103,20 +103,62 @@ function driveFileId(link) {
   return m[1];
 }
 
+const isHtml = (t) => /^\s*<(!doctype|html)/i.test(t);
+
+/**
+ * Drive refuses to virus-scan .js files and serves a "Download anyway" page instead.
+ * In a browser you click through it; here we parse the form and submit it ourselves.
+ */
+function confirmUrlFrom(html) {
+  const form = html.match(/<form[^>]+action="([^"]+)"[^>]*>([\s\S]*?)<\/form>/i);
+  if (!form) return null;
+  const action = form[1].replace(/&amp;/g, '&');
+  const params = new URLSearchParams();
+  const re = /<input[^>]+type="hidden"[^>]*>/gi;
+  let m;
+  while ((m = re.exec(form[2]))) {
+    const n = m[0].match(/name="([^"]*)"/i);
+    const v = m[0].match(/value="([^"]*)"/i);
+    if (n) params.set(n[1], (v ? v[1] : '').replace(/&amp;/g, '&'));
+  }
+  return `${action}?${params.toString()}`;
+}
+
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+           '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
 async function fetchScript(link) {
   const id = driveFileId(link);
   const candidates = [
-    `https://drive.usercontent.google.com/download?id=${id}&export=download`,
-    `https://drive.google.com/uc?export=download&id=${id}`,
+    `https://drive.usercontent.google.com/download?id=${id}&export=download&confirm=t`,
+    `https://drive.google.com/uc?export=download&id=${id}&confirm=t`,
+    `https://docs.google.com/uc?export=download&id=${id}&confirm=t`,
   ];
+
   let last = '';
   for (const u of candidates) {
     try {
-      const res = await fetch(u, { redirect: 'follow' });
-      const text = await res.text();
-      if (res.ok && text.length > 20 && !/^\s*<(!doctype|html)/i.test(text)) return text;
-      last = `${res.status} ${text.slice(0, 120)}`;
-    } catch (e) { last = String(e); }
+      let res = await fetch(u, { redirect: 'follow', headers: { 'User-Agent': UA } });
+      let text = await res.text();
+
+      // Still on the interstitial? Submit its form and take the result.
+      if (isHtml(text)) {
+        const next = confirmUrlFrom(text);
+        if (next) {
+          const cookie = (res.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).join('; ');
+          res = await fetch(next, {
+            redirect: 'follow',
+            headers: { 'User-Agent': UA, ...(cookie ? { Cookie: cookie } : {}) },
+          });
+          text = await res.text();
+        }
+      }
+
+      if (res.ok && text.length > 20 && !isHtml(text)) return text;
+      last = `${res.status} ${text.slice(0, 140).replace(/\s+/g, ' ')}`;
+    } catch (e) {
+      last = String(e);
+    }
   }
   throw new Error(`Could not download script ${id}: ${last}`);
 }
