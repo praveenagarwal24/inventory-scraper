@@ -31,7 +31,8 @@ const CFG = {
   attempts:     int(env('ATTEMPTS'), 2),
   shardIndex:   int(env('SHARD_INDEX'), 0),
   shardTotal:   int(env('SHARD_TOTAL'), 1),
-  only:         env('ONLY') || '',               // substring filter on URL
+  only:         env('ONLY') || '',               // comma-separated substrings matched against URL
+  limit:        int(env('LIMIT'), 0),            // 0 = no cap
   dryRun:       env('DRY_RUN') === '1',
   outDir:       path.resolve(env('OUT_DIR') || 'out'),
   failOnError:  env('FAIL_ON_ERROR') === '1',
@@ -311,10 +312,34 @@ async function main() {
   console.log(`Run date ${RUN_DATE} (${CFG.timezone})`);
 
   let rows = await loadRows();
-  if (CFG.only) rows = rows.filter((r) => r.url.includes(CFG.only));
+  console.log(`Sheet returned ${rows.length} usable row(s)`);
+
+  if (CFG.only) {
+    const terms = CFG.only.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+    rows = rows.filter((r) => {
+      const hay = `${r.url} ${r.name}`.toLowerCase();
+      return terms.some((t) => hay.includes(t));
+    });
+    console.log(`Filter "${CFG.only}" matched ${rows.length} site(s)`);
+  }
+
   if (CFG.shardTotal > 1) rows = rows.filter((_, i) => i % CFG.shardTotal === CFG.shardIndex);
+  if (CFG.limit > 0 && rows.length > CFG.limit) {
+    console.log(`Capping to first ${CFG.limit} of ${rows.length} site(s)`);
+    rows = rows.slice(0, CFG.limit);
+  }
   console.log(`${rows.length} site(s) to process, concurrency ${CFG.concurrency}\n`);
-  if (!rows.length) { console.log('Nothing to do.'); return; }
+  if (!rows.length) {
+    console.error(
+      '\nNo sites to process. A run that scrapes nothing is a failure, not a success.\n' +
+      (CFG.only ? `  - The "only" filter was "${CFG.only}" and matched nothing. Check spelling.\n` : '') +
+      '  - Otherwise: is the sheet shared as "Anyone with the link"?\n' +
+      `  - Does tab "${CFG.sheetTab}" have URLs in column ${CFG.urlCol} and Drive links in column ${CFG.scriptCol}?\n` +
+      '  - Both cells must start with http:// or https:// or the row is skipped.'
+    );
+    process.exit(1);
+  }
+
 
   const browser = await puppeteer.launch({
     headless: 'new',
