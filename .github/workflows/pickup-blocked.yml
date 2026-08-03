@@ -1,0 +1,62 @@
+name: Pickup blocked sites (self-hosted)
+
+# Runs on YOUR machine, on YOUR IP. Because the runner skips sites that already
+# have a file in Drive for today, this needs no list of "blocked sites" - it
+# simply scrapes whatever the cloud run failed to get. As sites start or stop
+# blocking datacenter IPs, this adjusts by itself.
+
+on:
+  schedule:
+    # 12:30 UTC = 18:00 IST, Monday to Friday - 30 minutes after the cloud run,
+    # which gives it time to finish and record what it managed to get.
+    - cron: '30 12 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated text to match against site URLs (blank = all pending)'
+        required: false
+        default: ''
+      force:
+        description: 'Re-scrape sites that already have a file in Drive today'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  pickup:
+    runs-on: self-hosted
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Scrape whatever is still missing
+        env:
+          SHEET_ID:         ${{ secrets.SHEET_ID }}
+          SHEET_TAB:        Main
+          URL_COL:          L
+          SCRIPT_COL:       M
+          APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:       ${{ secrets.RUN_SECRET }}
+          TIMEZONE:         America/New_York
+          # Gentler than the cloud run: this is your home connection, and the
+          # sites that land here are the ones already suspicious of traffic.
+          CONCURRENCY:      '3'
+          SITE_TIMEOUT_MS:  '180000'
+          IDLE_GRACE_MS:    '8000'
+          BLOCK_ASSETS:     '1'
+          ONLY:             ${{ github.event.inputs.only }}
+          SKIP_EXISTING:    ${{ github.event.inputs.force == 'true' && '0' || '1' }}
+        run: node src/run.js
+
+      - name: Keep a copy of the CSVs for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pickup-csvs-${{ github.run_number }}
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
