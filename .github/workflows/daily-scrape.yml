@@ -52,9 +52,9 @@ jobs:
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
-          CONCURRENCY:      '5'
-          SITE_TIMEOUT_MS:  '300000'
-          IDLE_GRACE_MS:    '15000'
+          CONCURRENCY:      '8'
+          SITE_TIMEOUT_MS:  '150000'
+          IDLE_GRACE_MS:    '8000'
           BLOCK_ASSETS:     '1'
           # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
           ONLY:             ${{ github.event.inputs.only }}
