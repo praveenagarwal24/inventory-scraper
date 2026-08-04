@@ -33,10 +33,12 @@ const CFG = {
   navTimeout:   int(env('NAV_TIMEOUT_MS'), 45 * 1000),
   idleGrace:    int(env('IDLE_GRACE_MS'), 8 * 1000),   // quiet time before we call it done
   attempts:     int(env('ATTEMPTS'), 2),
+  minRows:      int(env('MIN_ROWS'), 1),        // a header-only CSV is a failure, not a success
   blockAssets:  env('BLOCK_ASSETS') !== '0',
   skipExisting: env('SKIP_EXISTING') !== '0',   // skip sites already in Drive for today
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
   proxyUrl:     env('PROXY_URL') || '',        // applies to every site unless overridden
+  chromePath:   env('CHROME_PATH') || '',      // use an existing Chrome instead of Puppeteer's
   shardIndex:   int(env('SHARD_INDEX'), 0),
   shardTotal:   int(env('SHARD_TOTAL'), 1),
   only:         env('ONLY') || '',
@@ -301,7 +303,7 @@ async function scrapeOne(browser, site, scriptText) {
       const hit = await settledDownload(dlDir);
       if (hit) {
         const csv = await fsp.readFile(hit.file, 'utf8');
-        return { name: hit.name, csv, via: 'download', secs: Math.round((Date.now() - t0) / 1000) };
+        return { name: hit.name, csv, via: 'download', loadStatus, secs: Math.round((Date.now() - t0) / 1000) };
       }
       if (evalError) {
         const e = new Error(`Script threw: ${evalError.message || evalError}`);
@@ -328,7 +330,7 @@ async function scrapeOne(browser, site, scriptText) {
     if (best && best.length > 50) {
       return {
         name: rec.name || defaultName(site), csv: best,
-        via: 'blob-recovery', secs: Math.round((Date.now() - t0) / 1000),
+        via: 'blob-recovery', loadStatus, secs: Math.round((Date.now() - t0) / 1000),
       };
     }
 
@@ -435,9 +437,11 @@ async function main() {
   console.log(`Run date ${RUN_DATE} (${CFG.timezone})`);
 
   // Apps Script cold-starts in ~30s. Launch Chrome while we wait rather than after.
+  if (CFG.chromePath) console.log(`Using Chrome at ${CFG.chromePath}`);
   const browserPromise = puppeteer.launch({
     headless: 'new',
     protocolTimeout: CFG.siteTimeout + 120000,
+    ...(CFG.chromePath ? { executablePath: CFG.chromePath } : {}),
     args: [
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled', '--window-size=1440,900',
@@ -510,9 +514,22 @@ async function main() {
     for (let attempt = 1; attempt <= CFG.attempts; attempt++) {
       try {
         const script = await fetchScript(site.scriptLink);
-        const { name, csv, via, secs } = await scrapeOne(browser, site, script);
+        const { name, csv, via, secs, loadStatus } = await scrapeOne(browser, site, script);
 
         const dataRows = Math.max(0, csv.trim().split('\n').length - 1);
+
+        // A header-only CSV means the scrape came back with nothing. Uploading it
+        // would overwrite good data and mark the site "done" in the manifest, so
+        // tomorrow's run would skip it. Treat it as the failure it is.
+        if (dataRows < CFG.minRows) {
+          const e = new Error(
+            `CSV had ${dataRows} data rows` +
+            (loadStatus >= 400 ? ` | page load was HTTP ${loadStatus}, likely bot/geo block` : '')
+          );
+          if (loadStatus >= 400) e.blocked = true;
+          throw e;
+        }
+
         const hash = crypto.createHash('sha1').update(csv).digest('hex');
 
         // Two sheet rows can point at the same dealer (alias domains, or the same
@@ -533,8 +550,7 @@ async function main() {
 
         await fsp.writeFile(path.join(CFG.outDir, fileName), csv, 'utf8');
         await upload(fileName, csv, site.url, dataRows);
-        const tag = dataRows === 0 ? 'EMPTY' : 'OK   ';
-        console.log(`${tag} ${label} -> ${fileName} (${dataRows} rows, ${secs}s, ${via})`);
+        console.log(`OK    ${label} -> ${fileName} (${dataRows} rows, ${secs}s, ${via})`);
         return { url: site.url, status: 'ok', rows: dataRows, fileName, secs, via };
       } catch (err) {
         const msg = err.message || String(err);
@@ -567,11 +583,6 @@ async function main() {
     `${skipped.length ? `, ${skipped.length} deferred to next run` : ''}` +
     ` in ${Math.round((Date.now() - started) / 1000)}s.`
   );
-  const empty = ok.filter((r) => r.rows === 0);
-  if (empty.length) {
-    console.log(`\nProduced an empty CSV (${empty.length}) - worth checking these scripts:`);
-    empty.forEach((r) => console.log(`  ${r.url}`));
-  }
   if (bad.length) {
     const blocked = bad.filter((r) => r.blocked);
     console.log('\nFailures:');
@@ -596,4 +607,15 @@ async function main() {
   if (bad.length && (CFG.failOnError || ok.length === 0)) process.exit(1);
 }
 
-main().catch((e) => { console.error('Fatal:', e); process.exit(1); });
+main().catch((e) => {
+  const m = String(e && e.message || e);
+  if (/spawn|ENOENT|EBADMACHO|Failed to launch/i.test(m)) {
+    console.error('\nChrome could not start. On macOS this usually means the bundled');
+    console.error('Chrome is incomplete or quarantined by Gatekeeper. Either reinstall it:');
+    console.error('  rm -rf ~/.cache/puppeteer && npx puppeteer browsers install chrome');
+    console.error('  xattr -cr ~/.cache/puppeteer');
+    console.error('or point CHROME_PATH at a Chrome you already have installed.\n');
+  }
+  console.error('Fatal:', e);
+  process.exit(1);
+});
