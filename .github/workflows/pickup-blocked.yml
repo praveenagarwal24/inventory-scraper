@@ -48,6 +48,7 @@ jobs:
           SITE_TIMEOUT_MS:  '180000'
           IDLE_GRACE_MS:    '8000'
           BLOCK_ASSETS:     '1'
+          CHROME_PATH:      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
           ONLY:             ${{ github.event.inputs.only }}
           SKIP_EXISTING:    ${{ github.event.inputs.force == 'true' && '0' || '1' }}
         run: node src/run.js
