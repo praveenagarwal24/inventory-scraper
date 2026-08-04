@@ -31,6 +31,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
+        env:
+          # This job uses the Mac's own Chrome (CHROME_PATH below), so there is no
+          # reason to download Puppeteer's bundled copy - and skipping it avoids
+          # the partially-downloaded cache that breaks npm install on macOS.
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
         run: npm install
 
       - name: Scrape whatever is still missing
