@@ -27,13 +27,16 @@ const CFG = {
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
   runSecret:    env('RUN_SECRET') || '',
   timezone:     env('TIMEZONE') || 'America/New_York',
-  concurrency:  int(env('CONCURRENCY'), 8),
-  stagger:      int(env('STAGGER_MS'), 400),    // spread out the FIRST batch only
+  concurrency:  int(env('CONCURRENCY'), 5),
+  retryDelay:   int(env('RETRY_DELAY_MS'), 12000),
+  stagger:      int(env('STAGGER_MS'), 900),    // spread out the FIRST batch only
   siteTimeout:  int(env('SITE_TIMEOUT_MS'), 150 * 1000),
   navTimeout:   int(env('NAV_TIMEOUT_MS'), 45 * 1000),
   idleGrace:    int(env('IDLE_GRACE_MS'), 8 * 1000),   // quiet time before we call it done
-  attempts:     int(env('ATTEMPTS'), 2),
+  attempts:     int(env('ATTEMPTS'), 3),
   minRows:      int(env('MIN_ROWS'), 1),        // a header-only CSV is a failure, not a success
+  minRowsRatio: parseFloat(env('MIN_ROWS_RATIO')) || 0.75, // vs the last known good count
+  baselineChk:  env('BASELINE_CHECK') !== '0',
   blockAssets:  env('BLOCK_ASSETS') !== '0',
   skipExisting: env('SKIP_EXISTING') !== '0',   // skip sites already in Drive for today
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
@@ -225,7 +228,7 @@ function parseProxy(raw) {
   } catch { return { server: raw, username: '', password: '' }; }
 }
 
-async function scrapeOne(browser, site, scriptText) {
+async function scrapeOne(browser, site, scriptText, patience = 1) {
   const t0 = Date.now();
   const dlDir = await fsp.mkdtemp(path.join(CFG.outDir, '.dl-'));
   const proxy = parseProxy(site.proxy);
@@ -292,13 +295,13 @@ async function scrapeOne(browser, site, scriptText) {
       // Not fatal. The landing page may be challenged while the APIs still answer.
       console.warn(`  note  ${site.url} loaded with HTTP ${loadStatus}; continuing anyway`);
     }
-    await page.waitForNetworkIdle({ idleTime: 800, timeout: 3000 }).catch(() => {});
+    await page.waitForNetworkIdle({ idleTime: 800, timeout: Math.round(3000 * patience) }).catch(() => {});
 
     // Kick the script off. We do not block on it: the download landing on disk is the
     // real completion signal, and not every script resolves cleanly.
     page.evaluate(scriptText).then(() => { evalDone = true; }, (e) => { evalError = e; });
 
-    const deadline = Date.now() + CFG.siteTimeout;
+    const deadline = Date.now() + Math.round(CFG.siteTimeout * patience);
     while (Date.now() < deadline) {
       const hit = await settledDownload(dlDir);
       if (hit) {
@@ -313,7 +316,7 @@ async function scrapeOne(browser, site, scriptText) {
 
       // Fast fail: script finished AND the network has gone quiet, but no file appeared.
       // Waiting out the full timeout here is what used to make bad sites cost 6 minutes.
-      if (evalDone && Date.now() - lastActivity > CFG.idleGrace) break;
+      if (evalDone && Date.now() - lastActivity > CFG.idleGrace * patience) break;
 
       await sleep(500);
     }
@@ -385,14 +388,14 @@ async function postToWebApp(payload, tries = 3) {
   throw new Error(last);
 }
 
-async function upload(fileName, csv, siteUrl, dataRows) {
+async function upload(fileName, csv, siteUrl, dataRows, low) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return { ok: true, skipped: true };
   const b64 = Buffer.from(csv, 'utf8').toString('base64');
   if (b64.length > 45 * 1024 * 1024) throw new Error('CSV too large for the web app (>45MB encoded)');
 
   return postToWebApp({
     secret: CFG.runSecret, action: 'file', date: RUN_DATE,
-    fileName, csvB64: b64, site: siteUrl, rows: dataRows,
+    fileName, csvB64: b64, site: siteUrl, rows: dataRows, low: !!low,
   });
 }
 
@@ -418,6 +421,22 @@ async function fetchDoneSites() {
   } catch (e) {
     console.warn(`Manifest lookup failed: ${e.message}. Processing everything.`);
     return new Set();
+  }
+}
+
+async function fetchBaseline() {
+  if (!CFG.baselineChk || CFG.dryRun || !CFG.appsScriptUrl) return new Map();
+  try {
+    const j = await postToWebApp({ secret: CFG.runSecret, action: 'baseline', date: RUN_DATE });
+    const m = new Map();
+    for (const [url, rows] of Object.entries(j.rows || {})) {
+      const n = Number(rows);
+      if (Number.isFinite(n) && n > 0) m.set(url, n);
+    }
+    return m;
+  } catch (e) {
+    console.warn(`Baseline lookup failed: ${e.message}. Row-count checks are off for this run.`);
+    return new Map();
   }
 }
 
@@ -456,7 +475,8 @@ async function main() {
     rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
     console.log(`Filter "${CFG.only}" matched ${rows.length} site(s)`);
   }
-  const done = await fetchDoneSites();
+  const [done, baseline] = await Promise.all([fetchDoneSites(), fetchBaseline()]);
+  if (baseline.size) console.log(`Baseline row counts loaded for ${baseline.size} site(s)`);
   if (done.size) {
     const before = rows.length;
     rows = rows.filter((r) => !done.has(r.url));
@@ -486,7 +506,8 @@ async function main() {
 
   console.log(
     `${rows.length} site(s), concurrency ${CFG.concurrency}, ` +
-    `timeout ${Math.round(CFG.siteTimeout / 1000)}s, assets ${CFG.blockAssets ? 'blocked' : 'allowed'}` +
+    `timeout ${Math.round(CFG.siteTimeout / 1000)}s, up to ${CFG.attempts} attempts, ` +
+    `assets ${CFG.blockAssets ? 'blocked' : 'allowed'}` +
     `${CFG.proxyUrl ? ', proxy on' : ''}\n`
   );
 
@@ -511,10 +532,16 @@ async function main() {
     }
     if (CFG.stagger && launched < CFG.concurrency) await sleep(launched++ * CFG.stagger);
 
+    const expected = baseline.get(site.url) || 0;
+    let best = null;   // keep the fullest scrape across attempts
+
     for (let attempt = 1; attempt <= CFG.attempts; attempt++) {
       try {
         const script = await fetchScript(site.scriptLink);
-        const { name, csv, via, secs, loadStatus } = await scrapeOne(browser, site, script);
+        // Each retry gets 50% more time than the last - a short scrape is usually
+        // a script that got cut off, not one that had nothing to find.
+        const patience = 1 + (attempt - 1) * 0.5;
+        const { name, csv, via, secs, loadStatus } = await scrapeOne(browser, site, script, patience);
 
         const dataRows = Math.max(0, csv.trim().split('\n').length - 1);
 
@@ -530,17 +557,32 @@ async function main() {
           throw e;
         }
 
-        const hash = crypto.createHash('sha1').update(csv).digest('hex');
+        if (!best || dataRows > best.dataRows) best = { name, csv, via, secs, dataRows };
+
+        // Scraper scripts paginate with `catch (e) { break; }`, so one rate-limited
+        // page ends collection early and still writes a valid CSV. A big drop against
+        // the last known good count is the only way to see that from out here.
+        const floor = Math.floor(expected * CFG.minRowsRatio);
+        const low = expected > 0 && dataRows < floor;
+        if (low && attempt < CFG.attempts) {
+          console.warn(`low   ${label}: ${dataRows} rows vs ${expected} last time - retrying slower`);
+          await sleep(CFG.retryDelay * attempt);
+          continue;
+        }
+
+        const useName = best.name, useCsv = best.csv, useRows = best.dataRows;
+        const stillLow = expected > 0 && useRows < floor;
+        const hash = crypto.createHash('sha1').update(useCsv).digest('hex');
 
         // Two sheet rows can point at the same dealer (alias domains, or the same
         // script listed twice). Identical content goes to Drive once, not twice.
         if (seenHashes.has(hash)) {
           const twin = seenHashes.get(hash);
           console.log(`DUP   ${label} -> identical to ${twin}, not uploaded again`);
-          return { url: site.url, status: 'duplicate', rows: dataRows, fileName: twin, secs };
+          return { url: site.url, status: 'duplicate', rows: useRows, fileName: twin, secs };
         }
 
-        let fileName = name || defaultName(site);
+        let fileName = useName || defaultName(site);
         if (used.has(fileName)) {
           const ext = path.extname(fileName);
           fileName = `${fileName.slice(0, -ext.length)}_${site.rowNumber}${ext}`;
@@ -565,7 +607,7 @@ async function main() {
           return { url: site.url, status: 'failed', error: msg };
         }
         console.warn(`retry ${label} (attempt ${attempt}): ${msg}`);
-        await sleep(8000 * attempt);
+        await sleep(CFG.retryDelay * attempt);
       }
     }
   });
@@ -574,15 +616,22 @@ async function main() {
   await postLog(results);
 
   const ok = results.filter((r) => r.status === 'ok');
+  const low = results.filter((r) => r.status === 'low');
   const dup = results.filter((r) => r.status === 'duplicate');
   const skipped = results.filter((r) => r.status === 'skipped');
   const bad = results.filter((r) => r.status === 'failed');
   console.log(
     `\n${ok.length} succeeded, ${bad.length} failed` +
+    `${low.length ? `, ${low.length} suspiciously low` : ''}` +
     `${dup.length ? `, ${dup.length} duplicate` : ''}` +
     `${skipped.length ? `, ${skipped.length} deferred to next run` : ''}` +
     ` in ${Math.round((Date.now() - started) / 1000)}s.`
   );
+  if (low.length) {
+    console.log('\nRow count well below the last known good figure - data is probably');
+    console.log('truncated. Uploaded anyway, and left unmarked so the next run retries:');
+    low.forEach((r) => console.log(`  ${r.url}  ${r.rows} rows (was ~${r.expected})`));
+  }
   if (bad.length) {
     const blocked = bad.filter((r) => r.blocked);
     console.log('\nFailures:');
@@ -598,8 +647,13 @@ async function main() {
       `## Scrape ${RUN_DATE}`, '',
       `**${ok.length} succeeded, ${bad.length} failed**`, '',
       '| Site | Status | Rows | Secs | Detail |', '|---|---|---|---|---|',
-      ...results.map((r) =>
-        `| ${r.url} | ${r.status === 'ok' ? 'ok' : 'FAILED'} | ${r.rows ?? ''} | ${r.secs ?? ''} | ${r.fileName || (r.error || '').slice(0, 120)} |`),
+      ...results.map((r) => {
+        const st = r.status === 'ok' ? 'ok'
+          : r.status === 'low' ? `LOW (was ~${r.expected})`
+          : r.status === 'duplicate' ? 'duplicate'
+          : r.status === 'skipped' ? 'deferred' : 'FAILED';
+        return `| ${r.url} | ${st} | ${r.rows ?? ''} | ${r.secs ?? ''} | ${r.fileName || (r.error || '').slice(0, 120)} |`;
+      }),
     ];
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
   }
