@@ -5,7 +5,7 @@ on:
     # 12:00 UTC = 17:30 IST, Monday to Friday.
     # Cron is always UTC and India has no DST, so this never drifts.
     # - cron: '0 12 * * 1-5'
-    - cron: '27 12 * * 1-5'
+    - cron: '30 09 * * 1-6'
   workflow_dispatch:
     inputs:
       only:
