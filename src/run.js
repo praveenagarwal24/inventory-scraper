@@ -98,6 +98,18 @@ function parseCsv(text) {
 const colIndex = (letters) =>
   letters.toUpperCase().split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 
+// Sheet URLs are hand-entered, so plenty arrive as "www.dealer.com" or
+// "dealer.com/inventory" with no scheme. Treat those as https rather than
+// dropping the row.
+function normaliseUrl(raw) {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  if (/^(na|n\/a|tbd|-|none)$/i.test(v)) return '';
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^[a-z0-9][\w-]*(\.[\w-]+)+(\/|$|\?)/i.test(v)) return 'https://' + v;
+  return '';
+}
+
 async function loadRows() {
   const url = CFG.sheetGid
     ? `https://docs.google.com/spreadsheets/d/${CFG.sheetId}/export?format=csv&gid=${CFG.sheetGid}`
@@ -114,15 +126,39 @@ async function loadRows() {
   const nI = CFG.nameCol ? colIndex(CFG.nameCol) : -1;
   const pI = CFG.proxyCol ? colIndex(CFG.proxyCol) : -1;
 
-  return parseCsv(body)
-    .map((r, i) => ({
-      rowNumber: i + 1,
-      name: (nI >= 0 ? (r[nI] || '') : '').trim(),
-      url: (r[uI] || '').trim(),
-      scriptLink: (r[sI] || '').trim(),
-      proxy: (pI >= 0 ? (r[pI] || '') : '').trim() || CFG.proxyUrl,
-    }))
-    .filter((r) => /^https?:\/\//i.test(r.url) && /^https?:\/\//i.test(r.scriptLink));
+  const all = parseCsv(body).map((r, i) => ({
+    rowNumber: i + 1,
+    name: (nI >= 0 ? (r[nI] || '') : '').trim(),
+    rawUrl: (r[uI] || '').trim(),
+    url: normaliseUrl(r[uI]),
+    scriptLink: (r[sI] || '').trim(),
+    proxy: (pI >= 0 ? (r[pI] || '') : '').trim() || CFG.proxyUrl,
+  }));
+
+  const usable = [];
+  const skipped = { noScript: 0, noUrl: 0, badUrl: [] };
+  for (const r of all) {
+    const hasScript = /^https?:\/\//i.test(r.scriptLink);
+    if (!hasScript) { if (r.rawUrl) skipped.noScript++; continue; }
+    if (!r.url) {
+      if (r.rawUrl) skipped.badUrl.push(`row ${r.rowNumber}: "${r.rawUrl}"`);
+      else skipped.noUrl++;
+      continue;
+    }
+    usable.push(r);
+  }
+
+  const fixed = usable.filter((r) => r.url !== r.rawUrl).length;
+  if (fixed) console.log(`Added https:// to ${fixed} URL(s) written without a scheme`);
+  if (skipped.noScript) console.log(`Skipped ${skipped.noScript} row(s) with a URL but no script link`);
+  if (skipped.noUrl) console.log(`Skipped ${skipped.noUrl} row(s) with a script but no URL`);
+  if (skipped.badUrl.length) {
+    console.log(`Skipped ${skipped.badUrl.length} row(s) whose URL could not be parsed:`);
+    skipped.badUrl.slice(0, 15).forEach((x) => console.log(`  ${x}`));
+    if (skipped.badUrl.length > 15) console.log(`  ...and ${skipped.badUrl.length - 15} more`);
+  }
+
+  return usable;
 }
 
 // ---------------------------------------------------------------- Drive
