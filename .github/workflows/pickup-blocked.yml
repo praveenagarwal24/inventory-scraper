@@ -1,21 +1,19 @@
 name: Pickup blocked sites (self-hosted)
 
-# Runs on YOUR machine, on YOUR IP. Because the runner skips sites that already
-# have a file in Drive for today, this needs no list of "blocked sites" - it
-# simply scrapes whatever the cloud run failed to get. As sites start or stop
-# blocking datacenter IPs, this adjusts by itself.
+# Runs on YOUR Mac, on YOUR IP, for the dealer sites that block datacenter ranges.
+# Because the runner skips anything already in Drive for today, this needs no list
+# of blocked sites - it simply collects whatever the cloud run could not get.
 
 on:
-  # Runs automatically whenever the cloud scrape finishes - scheduled or manual -
-  # so the cycle always completes without you having to remember this step.
+  # Starts by itself the moment the cloud scrape finishes, manual or scheduled.
   workflow_run:
     workflows: ["Daily inventory scrape"]
     types: [completed]
 
   schedule:
-    # 12:30 UTC = 18:00 IST, Monday to Friday - 30 minutes after the cloud run,
-    # which gives it time to finish and record what it managed to get.
+    # 12:30 UTC = 18:00 IST, weekdays. Backstop in case the cloud run never fires.
     - cron: '30 12 * * 1-5'
+
   workflow_dispatch:
     inputs:
       only:
@@ -32,8 +30,7 @@ jobs:
   pickup:
     runs-on: self-hosted
     timeout-minutes: 90
-    # Skip only if the cloud run was cancelled; a partly-failed run is exactly
-    # when this job matters most.
+    # A partly-failed cloud run is exactly when this matters, so only skip cancels.
     if: >
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion != 'cancelled'
@@ -43,9 +40,9 @@ jobs:
 
       - name: Install dependencies
         env:
-          # This job uses the Mac's own Chrome (CHROME_PATH below), so there is no
-          # reason to download Puppeteer's bundled copy - and skipping it avoids
-          # the partially-downloaded cache that breaks npm install on macOS.
+          # Uses the Mac's own Chrome (CHROME_PATH below), so there is no reason to
+          # download Puppeteer's copy - and skipping it avoids the broken cache that
+          # breaks npm install on macOS.
           PUPPETEER_SKIP_DOWNLOAD: 'true'
         run: npm install
 
@@ -58,13 +55,18 @@ jobs:
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
-          # Gentler than the cloud run: this is your home connection, and the
-          # sites that land here are the ones already suspicious of traffic.
-          CONCURRENCY:      '3'
-          SITE_TIMEOUT_MS:  '180000'
-          IDLE_GRACE_MS:    '8000'
-          BLOCK_ASSETS:     '1'
           CHROME_PATH:      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+
+          CONCURRENCY:      '5'      # your Mac handles this fine
+          SITE_TIMEOUT_MS:  '150000' # slowest good scrape has been ~93s
+          SITE_BUDGET_MS:   '300000' # hard cap per site, across all attempts
+          IDLE_GRACE_MS:    '8000'
+          ATTEMPTS:         '2'      # these sites are usually blocked, not slow
+          RETRY_DELAY_MS:   '8000'
+          BLOCK_ASSETS:     '1'
+          LOT_SIZE:         '0'      # match the cloud run
+          MAX_MINUTES:      '40'     # stop starting new sites after this; resume next run
+
           ONLY:             ${{ github.event.inputs.only }}
           SKIP_EXISTING:    ${{ github.event.inputs.force == 'true' && '0' || '1' }}
         run: node src/run.js
@@ -75,5 +77,5 @@ jobs:
         with:
           name: pickup-csvs-${{ github.run_number }}
           path: out/
-          retention-days: 7
+          retention-days: 2
           if-no-files-found: ignore
