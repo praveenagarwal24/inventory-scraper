@@ -6,6 +6,12 @@ name: Pickup blocked sites (self-hosted)
 # blocking datacenter IPs, this adjusts by itself.
 
 on:
+  # Runs automatically whenever the cloud scrape finishes - scheduled or manual -
+  # so the cycle always completes without you having to remember this step.
+  workflow_run:
+    workflows: ["Daily inventory scrape"]
+    types: [completed]
+
   schedule:
     # 12:30 UTC = 18:00 IST, Monday to Friday - 30 minutes after the cloud run,
     # which gives it time to finish and record what it managed to get.
@@ -26,6 +32,11 @@ jobs:
   pickup:
     runs-on: self-hosted
     timeout-minutes: 90
+    # Skip only if the cloud run was cancelled; a partly-failed run is exactly
+    # when this job matters most.
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion != 'cancelled'
 
     steps:
       - uses: actions/checkout@v4
