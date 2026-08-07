@@ -83,7 +83,7 @@ jobs:
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
           CONCURRENCY:      '5'
-          SITE_TIMEOUT_MS:  '210000'
+          SITE_TIMEOUT_MS:  '150000'
           IDLE_GRACE_MS:    '12000'
           BLOCK_ASSETS:     '1'
           MIN_ROWS_RATIO:   '0.75'   # flag a site returning under 75% of last time
@@ -94,7 +94,7 @@ jobs:
           KEEP_DAYS:        '7'      # shard 0 trashes date folders older than this
           ATTEMPTS:         '3'
           RETRY_DELAY_MS:   '12000'
-          SITE_BUDGET_MS:   '400000'
+          SITE_BUDGET_MS:   '450000'
           # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
           ONLY:             ${{ github.event.inputs.only }}
           LIMIT:            ${{ github.event.inputs.limit }}
