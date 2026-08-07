@@ -39,9 +39,9 @@ jobs:
           SHEET_TAB:       Main
           URL_COL:         L
           SCRIPT_COL:      M
-          SITES_PER_SHARD: '9999'
+          SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
-          LOT_SIZE:        '0'
+          LOT_SIZE:        '20'
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:      ${{ secrets.RUN_SECRET }}
           TIMEZONE:        America/New_York
