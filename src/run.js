@@ -35,11 +35,14 @@ const CFG = {
   idleGrace:    int(env('IDLE_GRACE_MS'), 8 * 1000),   // quiet time before we call it done
   attempts:     int(env('ATTEMPTS'), 3),
   minRows:      int(env('MIN_ROWS'), 1),        // a header-only CSV is a failure, not a success
+  lotSize:      int(env('LOT_SIZE'), 20),       // files per Lot-NN folder, 0 = no lots
+  manifestBatch:int(env('MANIFEST_BATCH'), 25), // manifest rows sent per web app call
   minRowsRatio: parseFloat(env('MIN_ROWS_RATIO')) || 0.75, // vs the last known good count
   baselineChk:  env('BASELINE_CHECK') !== '0',
   blockAssets:  env('BLOCK_ASSETS') !== '0',
   skipExisting: env('SKIP_EXISTING') !== '0',   // skip sites already in Drive for today
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
+  keepDays:     int(env('KEEP_DAYS'), 0),       // trash date folders older than this
   proxyUrl:     env('PROXY_URL') || '',        // applies to every site unless overridden
   chromePath:   env('CHROME_PATH') || '',      // use an existing Chrome instead of Puppeteer's
   shardIndex:   int(env('SHARD_INDEX'), 0),
@@ -147,6 +150,12 @@ async function loadRows() {
     }
     usable.push(r);
   }
+
+  // Lot comes from position in the sheet, so every shard agrees without coordinating
+  // and a site lands in the same lot every day.
+  usable.forEach((r, i) => {
+    r.lot = CFG.lotSize > 0 ? 'Lot-' + String(Math.floor(i / CFG.lotSize) + 1).padStart(2, '0') : '';
+  });
 
   const fixed = usable.filter((r) => r.url !== r.rawUrl).length;
   if (fixed) console.log(`Added https:// to ${fixed} URL(s) written without a scheme`);
@@ -424,14 +433,14 @@ async function postToWebApp(payload, tries = 3) {
   throw new Error(last);
 }
 
-async function upload(fileName, csv, siteUrl, dataRows, low) {
+async function upload(fileName, csv, siteUrl, dataRows, low, lot) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return { ok: true, skipped: true };
   const b64 = Buffer.from(csv, 'utf8').toString('base64');
   if (b64.length > 45 * 1024 * 1024) throw new Error('CSV too large for the web app (>45MB encoded)');
 
   return postToWebApp({
     secret: CFG.runSecret, action: 'file', date: RUN_DATE,
-    fileName, csvB64: b64, site: siteUrl, rows: dataRows, low: !!low,
+    fileName, csvB64: b64, site: siteUrl, rows: dataRows, low: !!low, lot: lot || '',
   });
 }
 
@@ -449,15 +458,32 @@ async function postLog(results) {
   }).catch((e) => console.warn('Log post failed:', e.message));
 }
 
-async function fetchDoneSites() {
-  if (!CFG.skipExisting || CFG.dryRun || !CFG.appsScriptUrl) return new Set();
+async function fetchManifest() {
+  if (CFG.dryRun || !CFG.appsScriptUrl) return new Map();
   try {
     const j = await postToWebApp({ secret: CFG.runSecret, action: 'manifest', date: RUN_DATE });
-    return new Set(j.done || []);
+    return new Map(Object.entries(j.entries || {}));
   } catch (e) {
     console.warn(`Manifest lookup failed: ${e.message}. Processing everything.`);
-    return new Set();
+    return new Map();
   }
+}
+
+// Manifest rows are queued and sent in batches. One locked write per 25 files
+// instead of per file is what makes parallel shards viable.
+const manifestQueue = [];
+async function flushManifest() {
+  if (!manifestQueue.length || CFG.dryRun || !CFG.appsScriptUrl) return;
+  const batch = manifestQueue.splice(0, manifestQueue.length);
+  try {
+    await postToWebApp({ secret: CFG.runSecret, action: 'manifest-update', date: RUN_DATE, entries: batch });
+  } catch (e) {
+    console.warn(`Manifest update failed for ${batch.length} entr(ies): ${e.message}`);
+  }
+}
+async function recordManifest(entry) {
+  manifestQueue.push(entry);
+  if (manifestQueue.length >= CFG.manifestBatch) await flushManifest();
 }
 
 async function fetchBaseline() {
@@ -511,7 +537,8 @@ async function main() {
     rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
     console.log(`Filter "${CFG.only}" matched ${rows.length} site(s)`);
   }
-  const [done, baseline] = await Promise.all([fetchDoneSites(), fetchBaseline()]);
+  const [manifest, baseline] = await Promise.all([fetchManifest(), fetchBaseline()]);
+  const done = new Set([...manifest.entries()].filter(([, v]) => !v.low).map(([k]) => k));
   if (baseline.size) console.log(`Baseline row counts loaded for ${baseline.size} site(s)`);
   if (done.size) {
     const before = rows.length;
@@ -649,9 +676,17 @@ async function main() {
   });
 
   await browser.close().catch(() => {});
+  await flushManifest();
   await postLog(results);
+  if (CFG.keepDays > 0 && CFG.shardIndex === 0) {
+    try {
+      const c = await postToWebApp({ secret: CFG.runSecret, action: 'cleanup', keepDays: CFG.keepDays });
+      if (c.deleted && c.deleted.length) console.log(`\nTrashed ${c.deleted.length} folder(s) older than ${CFG.keepDays} days: ${c.deleted.join(', ')}`);
+    } catch (e) { console.warn(`Cleanup failed: ${e.message}`); }
+  }
 
   const ok = results.filter((r) => r.status === 'ok');
+  const kept = results.filter((r) => r.status === 'kept');
   const low = results.filter((r) => r.status === 'low');
   const dup = results.filter((r) => r.status === 'duplicate');
   const skipped = results.filter((r) => r.status === 'skipped');
@@ -660,6 +695,7 @@ async function main() {
     `\n${ok.length} succeeded, ${bad.length} failed` +
     `${low.length ? `, ${low.length} suspiciously low` : ''}` +
     `${dup.length ? `, ${dup.length} duplicate` : ''}` +
+    `${kept.length ? `, ${kept.length} kept existing` : ''}` +
     `${skipped.length ? `, ${skipped.length} deferred to next run` : ''}` +
     ` in ${Math.round((Date.now() - started) / 1000)}s.`
   );
