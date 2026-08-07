@@ -4,8 +4,7 @@ on:
   schedule:
     # 12:00 UTC = 17:30 IST, Monday to Friday.
     # Cron is always UTC and India has no DST, so this never drifts.
-    # - cron: '0 12 * * 1-5'
-    - cron: '30 09 * * 1-6'
+    - cron: '0 12 * * 1-5'
   workflow_dispatch:
     inputs:
       only:
@@ -26,9 +25,13 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 330
-    concurrency:
-      group: daily-scrape
-      cancel-in-progress: false
+    # Six parallel jobs, each taking every 6th row of the sheet. Lots and the
+    # manifest are keyed off sheet position, so the shards need no coordination.
+    # Raise SHARD_TOTAL and add matrix entries together as the site count grows.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
 
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +62,11 @@ jobs:
           IDLE_GRACE_MS:    '12000'
           BLOCK_ASSETS:     '1'
           MIN_ROWS_RATIO:   '0.75'   # flag a site returning under 75% of last time
+          SHARD_INDEX:      ${{ matrix.shard }}
+          SHARD_TOTAL:      '6'
+          LOT_SIZE:         '20'
+          MANIFEST_BATCH:   '25'
+          KEEP_DAYS:        '7'      # shard 0 trashes date folders older than this
           ATTEMPTS:         '3'
           RETRY_DELAY_MS:   '12000'
           # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
@@ -72,7 +80,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: csvs-${{ github.run_number }}
+          name: csvs-${{ github.run_number }}-shard${{ matrix.shard }}
           path: out/
-          retention-days: 7
+          retention-days: 2
           if-no-files-found: ignore
