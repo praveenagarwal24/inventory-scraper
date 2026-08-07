@@ -45,8 +45,9 @@ const CFG = {
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
   keepDays:     int(env('KEEP_DAYS'), 0),       // trash date folders older than this
   planOnly:     env('PLAN_ONLY') === '1',       // count sites, emit a shard plan, exit
-  sitesPerShard:int(env('SITES_PER_SHARD'), 75),
+  sitesPerShard:int(env('SITES_PER_SHARD'), 25),  // small, so we use the shard budget
   maxShards:    int(env('MAX_SHARDS'), 20),     // GitHub Free allows 20 concurrent jobs
+  shardDelay:   int(env('SHARD_DELAY_MS'), 2000),// stagger shard startup
   proxyUrl:     env('PROXY_URL') || '',        // applies to every site unless overridden
   chromePath:   env('CHROME_PATH') || '',      // use an existing Chrome instead of Puppeteer's
   shardIndex:   int(env('SHARD_INDEX'), 0),
@@ -538,6 +539,13 @@ async function main() {
         `shards=${JSON.stringify(list)}\ntotal=${n}\nsites=${rows.length}\n`);
     }
     return;
+  }
+
+  // Twenty shards all calling the web app at once makes for a rough first second.
+  if (CFG.shardIndex > 0 && CFG.shardDelay > 0) {
+    const wait = CFG.shardIndex * CFG.shardDelay;
+    console.log(`Shard ${CFG.shardIndex}: holding ${Math.round(wait / 1000)}s so the shards do not all start together`);
+    await sleep(wait);
   }
 
   puppeteer = (await import('puppeteer')).default;
