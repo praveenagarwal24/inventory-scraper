@@ -41,6 +41,10 @@ jobs:
           SCRIPT_COL:      M
           SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
+          LOT_SIZE:        '20'
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:      ${{ secrets.RUN_SECRET }}
+          TIMEZONE:        America/New_York
         run: node src/run.js
 
   scrape:
@@ -90,6 +94,7 @@ jobs:
           KEEP_DAYS:        '7'      # shard 0 trashes date folders older than this
           ATTEMPTS:         '3'
           RETRY_DELAY_MS:   '12000'
+          SITE_BUDGET_MS:   '400000'
           # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
           ONLY:             ${{ github.event.inputs.only }}
           LIMIT:            ${{ github.event.inputs.limit }}
