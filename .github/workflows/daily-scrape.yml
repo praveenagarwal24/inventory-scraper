@@ -32,9 +32,6 @@ jobs:
       sites:  ${{ steps.plan.outputs.sites }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - id: plan
         env:
           PLAN_ONLY:       '1'
@@ -42,7 +39,7 @@ jobs:
           SHEET_TAB:       Main
           URL_COL:         L
           SCRIPT_COL:      M
-          SITES_PER_SHARD: '75'
+          SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
         run: node src/run.js
 
