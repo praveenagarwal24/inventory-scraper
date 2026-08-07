@@ -15,6 +15,10 @@ import crypto from 'node:crypto';
 
 let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
+// Printed at the top of every run. If the log does not show the version you just
+// pasted, GitHub is running an older copy of this file.
+const RUNNER_VERSION = '2026-08-07-lotfix-4';
+
 // ---------------------------------------------------------------- config
 
 const CFG = {
@@ -579,7 +583,7 @@ async function pool(items, size, worker) {
 
 async function main() {
   await fsp.mkdir(CFG.outDir, { recursive: true });
-  console.log(`Run date ${RUN_DATE} (${CFG.timezone})`);
+  console.log(`runner ${RUNNER_VERSION} | run date ${RUN_DATE} (${CFG.timezone})`);
 
   // Planning pass: work out how many parallel shards this many sites deserves,
   // hand the answer to the workflow, and stop. Needs no browser.
@@ -770,6 +774,17 @@ async function main() {
           return { url: site.url, status: 'duplicate', rows: useRows, fileName: twin, secs };
         }
 
+        // If today already holds a fuller scrape of this site, leave it alone.
+        const prior = manifest.get(site.url);
+        if (prior && Number(prior.rows) > useRows) {
+          console.log(`KEEP  ${label} -> existing ${prior.rows} rows beats this ${useRows}, not replaced`);
+          return { url: site.url, status: 'kept', rows: Number(prior.rows), fileName: prior.file, secs: best.secs };
+        }
+
+        // Lot comes from sheet position, but once a site has a lot for today it
+        // keeps it - otherwise adding sheet rows mid-day strands earlier files.
+        const lot = (prior && prior.lot) || site.lot;
+
         let fileName = useName || defaultName(site);
         if (used.has(fileName)) {
           const ext = path.extname(fileName);
@@ -778,10 +793,28 @@ async function main() {
         used.add(fileName);
         seenHashes.set(hash, fileName);
 
-        await fsp.writeFile(path.join(CFG.outDir, fileName), csv, 'utf8');
-        await upload(fileName, csv, site.url, dataRows);
-        console.log(`OK    ${label} -> ${fileName} (${dataRows} rows, ${secs}s, ${via})`);
-        return { url: site.url, status: 'ok', rows: dataRows, fileName, secs, via };
+        await fsp.writeFile(path.join(CFG.outDir, fileName), useCsv, 'utf8');
+        try {
+          await upload(fileName, useCsv, site.url, useRows, stillLow, lot, prior);
+        } catch (upErr) {
+          // The scrape worked; only the upload did not. Re-running the browser
+          // would cost minutes and change nothing.
+          console.error(`FAIL  ${label} -> scraped ${useRows} rows but upload failed: ${upErr.message}`);
+          return { url: site.url, status: 'failed', rows: useRows, error: `upload: ${upErr.message}` };
+        }
+
+        await recordManifest({
+          site: site.url, file: fileName, lot: lot || '', rows: useRows, low: !!stillLow,
+        });
+        manifest.set(site.url, { file: fileName, lot: lot || '', rows: useRows, low: !!stillLow });
+
+        const where = lot ? `${lot}/` : '';
+        if (stillLow) {
+          console.warn(`LOW   ${label} -> ${where}${fileName} (${useRows} rows, expected ~${expected}) - uploaded, flagged for retry`);
+          return { url: site.url, status: 'low', rows: useRows, expected, fileName, secs: best.secs, via: best.via };
+        }
+        console.log(`OK    ${label} -> ${where}${fileName} (${useRows} rows, ${best.secs}s, ${best.via})`);
+        return { url: site.url, status: 'ok', rows: useRows, fileName, secs: best.secs, via: best.via };
       } catch (err) {
         const msg = err.message || String(err);
         if (err.blocked) {
