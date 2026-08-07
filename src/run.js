@@ -12,7 +12,8 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import puppeteer from 'puppeteer';
+
+let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // ---------------------------------------------------------------- config
 
@@ -43,6 +44,9 @@ const CFG = {
   skipExisting: env('SKIP_EXISTING') !== '0',   // skip sites already in Drive for today
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
   keepDays:     int(env('KEEP_DAYS'), 0),       // trash date folders older than this
+  planOnly:     env('PLAN_ONLY') === '1',       // count sites, emit a shard plan, exit
+  sitesPerShard:int(env('SITES_PER_SHARD'), 75),
+  maxShards:    int(env('MAX_SHARDS'), 20),     // GitHub Free allows 20 concurrent jobs
   proxyUrl:     env('PROXY_URL') || '',        // applies to every site unless overridden
   chromePath:   env('CHROME_PATH') || '',      // use an existing Chrome instead of Puppeteer's
   shardIndex:   int(env('SHARD_INDEX'), 0),
@@ -433,7 +437,7 @@ async function postToWebApp(payload, tries = 3) {
   throw new Error(last);
 }
 
-async function upload(fileName, csv, siteUrl, dataRows, low, lot) {
+async function upload(fileName, csv, siteUrl, dataRows, low, lot, prior) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return { ok: true, skipped: true };
   const b64 = Buffer.from(csv, 'utf8').toString('base64');
   if (b64.length > 45 * 1024 * 1024) throw new Error('CSV too large for the web app (>45MB encoded)');
@@ -441,6 +445,8 @@ async function upload(fileName, csv, siteUrl, dataRows, low, lot) {
   return postToWebApp({
     secret: CFG.runSecret, action: 'file', date: RUN_DATE,
     fileName, csvB64: b64, site: siteUrl, rows: dataRows, low: !!low, lot: lot || '',
+    // so the web app can clear an earlier copy that landed in a different lot
+    prevFile: (prior && prior.file) || '', prevLot: (prior && prior.lot) || '',
   });
 }
 
@@ -516,6 +522,25 @@ async function pool(items, size, worker) {
 async function main() {
   await fsp.mkdir(CFG.outDir, { recursive: true });
   console.log(`Run date ${RUN_DATE} (${CFG.timezone})`);
+
+  // Planning pass: work out how many parallel shards this many sites deserves,
+  // hand the answer to the workflow, and stop. Needs no browser.
+  if (CFG.planOnly) {
+    const rows = await loadRows();
+    const n = Math.max(1, Math.min(CFG.maxShards, Math.ceil(rows.length / CFG.sitesPerShard)));
+    const list = Array.from({ length: n }, (_, i) => i);
+    console.log(`${rows.length} site(s) / ${CFG.sitesPerShard} per shard -> ${n} shard(s)`);
+    if (n === CFG.maxShards) {
+      console.log(`Capped at MAX_SHARDS=${CFG.maxShards}; each shard takes ~${Math.ceil(rows.length / n)} sites.`);
+    }
+    if (process.env.GITHUB_OUTPUT) {
+      fs.appendFileSync(process.env.GITHUB_OUTPUT,
+        `shards=${JSON.stringify(list)}\ntotal=${n}\nsites=${rows.length}\n`);
+    }
+    return;
+  }
+
+  puppeteer = (await import('puppeteer')).default;
 
   // Apps Script cold-starts in ~30s. Launch Chrome while we wait rather than after.
   if (CFG.chromePath) console.log(`Using Chrome at ${CFG.chromePath}`);
