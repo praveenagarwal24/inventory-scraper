@@ -163,6 +163,17 @@ async function loadRows() {
     r.lot = CFG.lotSize > 0 ? 'Lot-' + String(Math.floor(i / CFG.lotSize) + 1).padStart(2, '0') : '';
   });
 
+  // Rows sharing a Drive script produce identical CSVs, which the content-hash
+  // check then discards as duplicates. If that count is high, most of the sheet
+  // is pointing at the same few scripts and very few files will be written.
+  const ids = new Set();
+  for (const r of usable) { try { ids.add(driveFileId(r.scriptLink)); } catch (e) {} }
+  if (ids.size < usable.length) {
+    console.log(`Sheet has ${usable.length} site(s) but only ${ids.size} distinct script(s)`);
+    console.log(`  ${usable.length - ids.size} row(s) reuse another row's script and will`);
+    console.log('  produce identical CSVs, which are uploaded once and logged as DUP.');
+  }
+
   const fixed = usable.filter((r) => r.url !== r.rawUrl).length;
   if (fixed) console.log(`Added https:// to ${fixed} URL(s) written without a scheme`);
   if (skipped.noScript) console.log(`Skipped ${skipped.noScript} row(s) with a URL but no script link`);
@@ -471,6 +482,32 @@ async function postLog(results) {
  * before anything runs in parallel. Drive allows same-named siblings, so this is
  * the only place folders are ever made - shards only look them up.
  */
+/**
+ * One call before any scraping starts. A misconfigured web app used to be found
+ * once per site, after the scrape, and each failure re-scraped the site - so a
+ * missing property turned into an hour of guaranteed-useless work.
+ */
+async function preflight() {
+  if (CFG.dryRun || !CFG.appsScriptUrl) return;
+  try {
+    const j = await postToWebApp({ secret: CFG.runSecret, action: 'manifest', date: RUN_DATE }, 1);
+    if (j.version) console.log(`Web app reachable [${j.version}]`);
+    return;
+  } catch (e) {
+    const m = e.message || String(e);
+    if (/Script Property|bad secret/i.test(m)) {
+      console.error(`\nThe web app rejected us: ${m}\n`);
+      console.error('Every upload would fail, so there is no point scraping. Check:');
+      console.error('  1. Apps Script -> Project Settings -> Script Properties has');
+      console.error('     SECRET, ROOT_FOLDER_ID and LOG_SHEET_ID set');
+      console.error('  2. The APPS_SCRIPT_URL secret points at that deployment');
+      console.error('  3. Opening that /exec URL in a browser returns "ok":true');
+      process.exit(2);
+    }
+    console.warn(`Web app check failed (${m}). Continuing; uploads may not work.`);
+  }
+}
+
 async function prepareFolders(siteCount) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return;
   const lots = CFG.lotSize > 0 ? Math.max(1, Math.ceil(siteCount / CFG.lotSize)) : 0;
@@ -600,6 +637,13 @@ async function main() {
     rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
     console.log(`Filter "${CFG.only}" matched ${rows.length} site(s)`);
   }
+  await preflight();
+
+  if (CFG.lotSize <= 0) {
+    console.warn('\n!! LOT_SIZE is 0 for this job, so every file goes straight into the');
+    console.warn('!! date folder. Set LOT_SIZE in the scrape job to match the plan job.\n');
+  }
+
   // Sharded runs get their folders from the plan job. A single-job run - the Mac
   // pickup - has no plan job, so it prepares its own. Either way, exactly one
   // serialised call creates folders before any parallel work begins.
@@ -641,6 +685,7 @@ async function main() {
   console.log(
     `${rows.length} site(s), concurrency ${CFG.concurrency}, ` +
     `timeout ${Math.round(CFG.siteTimeout / 1000)}s, up to ${CFG.attempts} attempts, ` +
+    `lots ${CFG.lotSize > 0 ? `of ${CFG.lotSize}` : 'OFF'}, ` +
     `assets ${CFG.blockAssets ? 'blocked' : 'allowed'}` +
     `${CFG.proxyUrl ? ', proxy on' : ''}\n`
   );
