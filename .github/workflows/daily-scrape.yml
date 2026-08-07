@@ -22,16 +22,40 @@ on:
         default: false
 
 jobs:
+  # Counts the sites in the sheet and decides how many parallel shards to run.
+  # Keeps wall-clock roughly flat as the sheet grows, with nothing to edit here.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      total:  ${{ steps.plan.outputs.total }}
+      sites:  ${{ steps.plan.outputs.sites }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - id: plan
+        env:
+          PLAN_ONLY:       '1'
+          SHEET_ID:        ${{ secrets.SHEET_ID }}
+          SHEET_TAB:       Main
+          URL_COL:         L
+          SCRIPT_COL:      M
+          SITES_PER_SHARD: '75'
+          MAX_SHARDS:      '20'
+        run: node src/run.js
+
   scrape:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 330
-    # Six parallel jobs, each taking every 6th row of the sheet. Lots and the
-    # manifest are keyed off sheet position, so the shards need no coordination.
-    # Raise SHARD_TOTAL and add matrix entries together as the site count grows.
+    # Each shard takes every Nth row of the sheet. Lots and the manifest are keyed
+    # off sheet position, so shards never need to coordinate.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +87,7 @@ jobs:
           BLOCK_ASSETS:     '1'
           MIN_ROWS_RATIO:   '0.75'   # flag a site returning under 75% of last time
           SHARD_INDEX:      ${{ matrix.shard }}
-          SHARD_TOTAL:      '6'
+          SHARD_TOTAL:      ${{ needs.plan.outputs.total }}
           LOT_SIZE:         '20'
           MANIFEST_BATCH:   '25'
           KEEP_DAYS:        '7'      # shard 0 trashes date folders older than this
