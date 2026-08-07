@@ -35,6 +35,7 @@ const CFG = {
   navTimeout:   int(env('NAV_TIMEOUT_MS'), 45 * 1000),
   idleGrace:    int(env('IDLE_GRACE_MS'), 8 * 1000),   // quiet time before we call it done
   attempts:     int(env('ATTEMPTS'), 3),
+  siteBudget:   int(env('SITE_BUDGET_MS'), 400000), // total time one site may consume
   minRows:      int(env('MIN_ROWS'), 1),        // a header-only CSV is a failure, not a success
   lotSize:      int(env('LOT_SIZE'), 20),       // files per Lot-NN folder, 0 = no lots
   manifestBatch:int(env('MANIFEST_BATCH'), 25), // manifest rows sent per web app call
@@ -534,6 +535,18 @@ async function main() {
     if (n === CFG.maxShards) {
       console.log(`Capped at MAX_SHARDS=${CFG.maxShards}; each shard takes ~${Math.ceil(rows.length / n)} sites.`);
     }
+    if (CFG.lotSize > 0 && CFG.appsScriptUrl) {
+      const lots = Math.max(1, Math.ceil(rows.length / CFG.lotSize));
+      try {
+        const r = await postToWebApp({
+          secret: CFG.runSecret, action: 'prepare', date: RUN_DATE, lots,
+        });
+        console.log(`Prepared ${lots} lot folder(s)${r.merged ? `, merged ${r.merged} duplicate(s)` : ''}`);
+      } catch (e) {
+        console.warn(`Could not pre-create lot folders: ${e.message}`);
+      }
+    }
+
     if (process.env.GITHUB_OUTPUT) {
       fs.appendFileSync(process.env.GITHUB_OUTPUT,
         `shards=${JSON.stringify(list)}\ntotal=${n}\nsites=${rows.length}\n`);
@@ -629,7 +642,16 @@ async function main() {
     if (CFG.stagger && launched < CFG.concurrency) await sleep(launched++ * CFG.stagger);
 
     const expected = baseline.get(site.url) || 0;
+    const siteStart = Date.now();
     let best = null;   // keep the fullest scrape across attempts
+
+    // Would another attempt blow this site's share of the run? A hung site used to
+    // cost 210 + 315 + 420 seconds on its own and drag its whole shard out. Sites
+    // that come back short return quickly, so they still get their retries.
+    const budgetLeft = (attempt) => {
+      const next = CFG.siteTimeout * (1 + (attempt - 1) * 0.5);
+      return (Date.now() - siteStart) + next <= CFG.siteBudget;
+    };
 
     for (let attempt = 1; attempt <= CFG.attempts; attempt++) {
       try {
@@ -660,7 +682,7 @@ async function main() {
         // the last known good count is the only way to see that from out here.
         const floor = Math.floor(expected * CFG.minRowsRatio);
         const low = expected > 0 && dataRows < floor;
-        if (low && attempt < CFG.attempts) {
+        if (low && attempt < CFG.attempts && budgetLeft(attempt + 1)) {
           console.warn(`low   ${label}: ${dataRows} rows vs ${expected} last time - retrying slower`);
           await sleep(CFG.retryDelay * attempt);
           continue;
@@ -698,9 +720,10 @@ async function main() {
           console.error(`FAIL  ${label} -> ${msg}`);
           return { url: site.url, status: 'failed', error: msg, blocked: true };
         }
-        if (attempt === CFG.attempts) {
-          console.error(`FAIL  ${label} -> ${msg}`);
-          return { url: site.url, status: 'failed', error: msg };
+        if (attempt === CFG.attempts || !budgetLeft(attempt + 1)) {
+          const why = attempt < CFG.attempts ? ` (gave up after ${Math.round((Date.now() - siteStart) / 1000)}s, budget reached)` : '';
+          console.error(`FAIL  ${label} -> ${msg}${why}`);
+          return { url: site.url, status: 'failed', error: msg + why };
         }
         console.warn(`retry ${label} (attempt ${attempt}): ${msg}`);
         await sleep(CFG.retryDelay * attempt);
