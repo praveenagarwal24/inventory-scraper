@@ -466,6 +466,25 @@ async function postLog(results) {
   }).catch((e) => console.warn('Log post failed:', e.message));
 }
 
+/**
+ * Creates the date folder and every lot folder, in one serialised web app call,
+ * before anything runs in parallel. Drive allows same-named siblings, so this is
+ * the only place folders are ever made - shards only look them up.
+ */
+async function prepareFolders(siteCount) {
+  if (CFG.dryRun || !CFG.appsScriptUrl) return;
+  const lots = CFG.lotSize > 0 ? Math.max(1, Math.ceil(siteCount / CFG.lotSize)) : 0;
+  const r = await postToWebApp({
+    secret: CFG.runSecret, action: 'prepare', date: RUN_DATE, lots,
+  });
+  console.log(`Prepared ${lots} lot folder(s) [web app ${r.version || 'UNKNOWN'}]` +
+              `${r.merged ? `, merged ${r.merged} duplicate(s)` : ''}`);
+  if (!r.version) {
+    console.warn('!! The web app reported no version, so it is running code from before');
+    console.warn('!! the lot-folder fix. Redeploy Code.gs as a NEW VERSION before trusting this run.');
+  }
+}
+
 async function fetchManifest() {
   if (CFG.dryRun || !CFG.appsScriptUrl) return new Map();
   try {
@@ -535,21 +554,19 @@ async function main() {
     if (n === CFG.maxShards) {
       console.log(`Capped at MAX_SHARDS=${CFG.maxShards}; each shard takes ~${Math.ceil(rows.length / n)} sites.`);
     }
-    if (CFG.lotSize > 0 && CFG.appsScriptUrl) {
-      const lots = Math.max(1, Math.ceil(rows.length / CFG.lotSize));
-      try {
-        const r = await postToWebApp({
-          secret: CFG.runSecret, action: 'prepare', date: RUN_DATE, lots,
-        });
-        console.log(`Prepared ${lots} lot folder(s)${r.merged ? `, merged ${r.merged} duplicate(s)` : ''}`);
-      } catch (e) {
-        console.warn(`Could not pre-create lot folders: ${e.message}`);
-      }
-    }
-
+    // Write the shard plan FIRST. The scrape jobs depend on this job, so anything
+    // that throws before this point stops the whole run from starting.
     if (process.env.GITHUB_OUTPUT) {
       fs.appendFileSync(process.env.GITHUB_OUTPUT,
         `shards=${JSON.stringify(list)}\ntotal=${n}\nsites=${rows.length}\n`);
+    }
+
+    try {
+      await prepareFolders(rows.length);
+    } catch (e) {
+      console.warn(`\nPrepare failed: ${e.message}`);
+      console.warn('Files will be written to the date folder instead of lot folders.');
+      console.warn('The scrape will still run.');
     }
     return;
   }
@@ -583,6 +600,14 @@ async function main() {
     rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
     console.log(`Filter "${CFG.only}" matched ${rows.length} site(s)`);
   }
+  // Sharded runs get their folders from the plan job. A single-job run - the Mac
+  // pickup - has no plan job, so it prepares its own. Either way, exactly one
+  // serialised call creates folders before any parallel work begins.
+  if (CFG.shardTotal === 1) {
+    try { await prepareFolders(rows.length); }
+    catch (e) { console.warn(`Prepare failed: ${e.message}`); }
+  }
+
   const [manifest, baseline] = await Promise.all([fetchManifest(), fetchBaseline()]);
   const done = new Set([...manifest.entries()].filter(([, v]) => !v.low).map(([k]) => k));
   if (baseline.size) console.log(`Baseline row counts loaded for ${baseline.size} site(s)`);
