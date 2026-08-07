@@ -1,141 +1,139 @@
 # Daily inventory scrape → Google Drive
 
-Automates the manual loop — *open URL → open console → paste script → wait → CSV downloads* —
-and files each result in Drive under `YYYY-MM-DD/`.
+Automates the manual loop — *open URL → open console → paste script → wait → CSV
+downloads* — for every dealer site in the sheet, and files the results in Drive.
 
-**Your scraper scripts are injected verbatim.** Nothing in column M needs editing, now or when
-you add sites.
+**Scraper scripts are injected verbatim.** Nothing in column M ever needs editing,
+and adding a site means adding a sheet row and nothing else.
+
+## The cycle
 
 ```
-Google Sheet "Main"          GitHub Actions (daily cron)         Apps Script Web App
- col L = site URL      ──▶   headless Chrome                ──▶  runs as YOU
- col M = Drive JS link       injects the script                  Drive/root/2026-08-04/*.csv
-                             catches the download                logs to sheet tab "Runs"
+17:30 IST   Daily inventory scrape        6 parallel shards on GitHub's runners
+              ↓ (chained automatically)
+            Pickup blocked sites          your Mac, for sites that block datacenter IPs
+              ↓
+            Drive/<root>/YYYY-MM-DD/Lot-01/*.csv
+                                    /_manifest.json
+            Sheet "Runs" tab             one row per site per run
 ```
 
-## Why this shape
+The second workflow fires whenever the first finishes — scheduled *or* manual — so
+triggering the cloud run by hand still completes the full cycle.
 
-The Twin Pine script never touches the DOM — it's `fetch()` against a JSON API plus regex over
-raw HTML. But it still needs a browser: the fetches are origin-relative and inherit cookies and
-`Referer`, dealer sites run bot protection that rejects bare HTTP clients, and the script reads
-`window.DlronGlobal_DealerId`. Puppeteer gives you all of that for free and keeps every script
-usable in both places — you can still paste them into your own console to debug.
+## Why it is shaped this way
 
-The Apps Script hop exists so no service account is needed. Service accounts have no Drive
-storage quota of their own and fail on personal Gmail. A web app deployed as *you* writes to
-*your* Drive on *your* quota, identically on personal and Workspace accounts.
+**Headless Chrome, not plain HTTP.** The scripts never touch the DOM — they're
+`fetch()` against JSON APIs plus regex over raw HTML — but they still need a browser:
+fetches are origin-relative and inherit cookies, dealer sites run bot protection that
+rejects bare HTTP clients, and some scripts read `window` globals.
 
----
+**An Apps Script web app in the middle.** It runs as you, so it writes to your Drive
+on your quota. No service account, which matters because service accounts have no
+Drive storage of their own.
 
-## Setup
+**A second runner on your Mac.** Some dealers block datacenter IP ranges outright.
+Your home connection reaches them; GitHub's runners do not. Because the manifest
+records what's already been collected, the Mac needs no list of blocked sites — it
+simply picks up whatever is still missing.
 
-### 1. Drive folder
+## Files
 
-Create the folder that will hold the dated subfolders. From its URL:
-`drive.google.com/drive/folders/`**`THIS_PART`** — that's `ROOT_FOLDER_ID`.
-
-### 2. Apps Script web app
-
-1. In your sheet: **Extensions → Apps Script**.
-2. Paste `apps-script/Code.gs` over `Code.gs`.
-3. Fill in the top four constants. For `SECRET`, generate a long random string
-   (`openssl rand -hex 24`) and keep a copy.
-4. **Deploy → New deployment → Web app**
-   - Execute as: **Me**
-   - Who has access: **Anyone**
-5. Authorize when prompted (the "unverified app" warning is expected for your own script —
-   *Advanced → Go to …*).
-6. Copy the `/exec` URL.
-
-"Anyone" only means anyone can send a request. The secret gates it, and the app can only ever
-write into `ROOT_FOLDER_ID`.
-
-Test it: open the `/exec` URL in a browser. You should see `{"ok":true,...}`.
-
-### 3. Sheet sharing
-
-The runner reads `Main` over plain HTTP, so set sharing to **Anyone with the link → Viewer**.
-If you'd rather keep it private, tell me and I'll switch the reader to go through the same
-web app instead.
-
-### 4. GitHub
-
-Push this repo, then **Settings → Secrets and variables → Actions → New repository secret**:
-
-| Secret | Value |
+| Path | What it is |
 |---|---|
-| `SHEET_ID` | `1GGUZPI3-i7aMscZaWqkBrTIh0mPJcRiMZO9favMxOnM` |
-| `APPS_SCRIPT_URL` | the `/exec` URL |
-| `RUN_SECRET` | the same random string as `SECRET` |
+| `src/run.js` | The whole runner. Both workflows use it. |
+| `.github/workflows/daily-scrape.yml` | Cloud run, 6 shards, 17:30 IST weekdays |
+| `.github/workflows/pickup-blocked.yml` | Self-hosted run, chained to the above |
+| `apps-script/Code.gs` | Drive drop-box. Config lives in Script Properties. |
+| `mac-scheduler/` | Optional launchd jobs, for when GitHub's cron runs late |
 
-Then **Actions → Daily inventory scrape → Run workflow** to test before trusting the cron.
+## Configuration
 
-Use a **public** repo for unlimited free minutes, or private for 2,000/month. Nothing sensitive
-lives in the code — all three secrets are in GitHub Secrets.
+**GitHub secrets** — Settings → Secrets and variables → Actions:
+`SHEET_ID`, `APPS_SCRIPT_URL`, `RUN_SECRET`
 
----
+**Apps Script** — Project Settings → Script Properties (never in the code, so pasting
+a new version cannot wipe them): `SECRET`, `ROOT_FOLDER_ID`, `LOG_SHEET_ID`
 
-## Running it
+**Workflow env** — the knobs worth knowing:
 
-| Where | How |
-|---|---|
-| Scheduled | 09:00 UTC daily. Cron is always UTC and does not follow DST — edit the `cron:` line to shift it. |
-| Manual | Actions → Run workflow. The **only** input filters to sites whose URL contains that text — handy for testing one dealer. |
-| Locally | `npm install`, set the env vars, `npm start`. `npm run dry` skips upload and just writes to `out/`. |
-
-Every run writes a summary table to the Actions page, appends to the **Runs** tab of your sheet,
-and keeps the CSVs as a downloadable artifact for 7 days.
-
-## Knobs
-
-| Env var | Default | Notes |
+| Setting | Default | What it does |
 |---|---|---|
-| `CONCURRENCY` | `3` | Sites at once. Raise carefully — it's a load question, not a CPU one. |
-| `SITE_TIMEOUT_MS` | `360000` | Per site. Twin Pine takes 30–60s; big stores need more. |
-| `ATTEMPTS` | `2` | Retries per site before giving up. |
-| `TIMEZONE` | `America/New_York` | Decides which date the folder is named after. |
-| `URL_COL` / `SCRIPT_COL` | `L` / `M` | Change if the sheet layout moves. |
-| `NAME_COL` | — | Optional column with a site label, used in logs and fallback filenames. |
-| `ONLY` | — | Substring filter on URL. |
-| `FAIL_ON_ERROR` | `0` | By default the run is only red if *every* site failed. |
+| `CONCURRENCY` | 5 | Sites at once, per shard |
+| `SHARD_TOTAL` | 6 | Must equal the number of matrix entries |
+| `SITE_TIMEOUT_MS` | 210000 | Per site, per attempt |
+| `ATTEMPTS` | 3 | Each retry gets 50% more time than the last |
+| `MIN_ROWS_RATIO` | 0.75 | Flag a scrape under 75% of its last good count |
+| `LOT_SIZE` | 20 | Files per `Lot-NN` folder, 0 for none |
+| `KEEP_DAYS` | 7 | Shard 0 trashes older date folders |
+| `CHROME_PATH` | — | Set on the Mac only, to use its installed Chrome |
+| `PROXY_URL` / `PROXY_COL` | — | For sites needing a different exit IP |
 
----
+## The correctness machinery
 
-## When something breaks
+Most of the complexity here exists because a scrape can fail *quietly*. In rough
+order of how much trouble each one saved:
 
-**One site fails, others fine.** Almost always the site changed. In the Twin Pine case the usual
-culprit is the `PIDS` page IDs — the script's own header comment tells you how to re-read them.
-Open the URL in your own Chrome, paste the script, and watch the console.
+**Row-count baselines.** Scraper scripts paginate with `catch (e) { break; }`, so one
+rate-limited page ends collection early and still writes a valid CSV. The runner
+compares against the last good count from previous date folders; anything under 75%
+is retried with more patience, uploaded with a `LOW` flag, and left unmarked so the
+next run tries again.
 
-**Everything fails at once.** Suspect the sheet URL, the secret, or the web app deployment.
-Note that editing the Apps Script requires **Deploy → Manage deployments → Edit → New version**;
-saving alone does not update the live `/exec`.
+**Empty CSVs are failures.** A header-only file used to upload and mark the site done.
+Now it fails, so the Mac's pickup run gets a shot at it.
 
-**A site returns 403 / a challenge page.** This is the one real risk of running in the cloud:
-Cloudflare treats GitHub's datacenter IPs more harshly than your laptop. If a dealer starts
-blocking, options are a stealth plugin, a residential proxy, or moving that one site to a
-self-hosted runner on your own machine. Worth knowing about now rather than being surprised.
+**Per-context downloads.** `Browser.setDownloadBehavior` is browser-wide unless scoped
+to a context — without that, concurrent sites claimed each other's CSVs and files were
+filed under the wrong dealer.
 
-**A script needs a login.** Ask me — cookie injection is a small addition to `scrapeOne`.
+**Content hashing.** Two sheet rows pointing at the same dealer upload once, and the
+second is logged `DUP` so you can spot the redundant row.
 
-## Scaling past ~100 sites
+**Never overwrite bigger with smaller.** A later run can only improve a day's data.
 
-The workflow is one job. To parallelise, add a matrix and pass the shard vars — the runner
-already honours them:
+**Fast failure on blocks.** A 4xx page load plus no CSV means an IP-level refusal;
+retrying from the same runner is pointless, so it doesn't.
 
-```yaml
-strategy:
-  matrix:
-    shard: [0, 1, 2, 3]
-env:
-  SHARD_INDEX: ${{ matrix.shard }}
-  SHARD_TOTAL: '4'
-```
+## Reading a run
 
-## Note on testing
+**Summary tab** of the run — table of every site with status, rows, seconds.
+**Runs tab** in the sheet — the same, but accumulating, which is where you spot a
+dealer quietly dropping from 400 rows to 12.
+**Log tail** — counts, then the low-row list, then failures with reasons, then which
+of those look like IP blocks.
 
-The parsing layer (sheet CSV, column letters, Drive link → file ID, including quoted fields
-containing commas) is unit-tested and passing. The browser layer could not be exercised in my
-sandbox — Chrome's download host is outside my allowlist — so the first real validation is your
-manual workflow run. Start with `ONLY` set to `twinpineford` and compare the row count against
-the 646 in the script header.
+Row counts matter more than the green checkmark. A run can succeed and still be wrong.
+
+## Common tasks
+
+**Run everything now** — Actions → Daily inventory scrape → Run workflow, both boxes
+empty. Pickup follows automatically.
+
+**Just a few sites** — put comma-separated text in `only`, e.g. `twinpineford,carzup`.
+Matched against URL and name, case-insensitive.
+
+**Re-scrape something already collected** — tick `force`.
+
+**Add sites** — add sheet rows. URLs without `https://` are fine; the runner adds it.
+
+**More throughput** — add matrix entries in `daily-scrape.yml` and raise `SHARD_TOTAL`
+to match. They must be equal or rows get skipped or done twice. GitHub Free allows 20
+concurrent jobs.
+
+## Known rough edges
+
+**Lots can exceed `LOT_SIZE`.** Lot comes from sheet position, so adding rows mid-day
+shifts sites between lots and can strand an earlier file. A fix exists in the current
+`run.js` and `Code.gs` (a site keeps its lot for the day, and stale copies are cleared).
+
+**Dedupe is per-shard.** Two rows for the same dealer are only caught as `DUP` if they
+land in the same shard.
+
+**The Mac must be awake** at pickup time. Locked is fine; asleep is not.
+`sudo pmset repeat wakeorpoweron MTWRF 17:25:00` covers it.
+
+**GitHub's cron runs late** — 15 minutes to 2.5 hours observed, and runs are sometimes
+dropped entirely. `mac-scheduler/` replaces it with a real clock if that matters.
+
+**Schedules pause after 60 days** of repo inactivity. Any commit resets it.
