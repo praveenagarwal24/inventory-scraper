@@ -10,10 +10,6 @@ on:
     workflows: ["Daily inventory scrape"]
     types: [completed]
 
-  schedule:
-    # 12:30 UTC = 18:00 IST, weekdays. Backstop in case the cloud run never fires.
-    - cron: '30 12 * * 1-5'
-
   workflow_dispatch:
     inputs:
       only:
@@ -30,6 +26,11 @@ jobs:
   pickup:
     runs-on: self-hosted
     timeout-minutes: 90
+    # The Mac runs one job at a time, so without this a second trigger just queues
+    # up behind the first and runs again for no reason.
+    concurrency:
+      group: pickup-blocked
+      cancel-in-progress: true
     # A partly-failed cloud run is exactly when this matters, so only skip cancels.
     if: >
       github.event_name != 'workflow_run' ||
