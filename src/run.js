@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-10-summary-1';
+const RUNNER_VERSION = '2026-08-11-realbrowser-1';
 
 // ---------------------------------------------------------------- config
 
@@ -55,6 +55,8 @@ const CFG = {
   shardDelay:   int(env('SHARD_DELAY_MS'), 2000),// stagger shard startup
   proxyUrl:     env('PROXY_URL') || '',        // applies to every site unless overridden
   chromePath:   env('CHROME_PATH') || '',      // use an existing Chrome instead of Puppeteer's
+  userDataDir:  env('USER_DATA_DIR') || '',    // persistent profile: keeps cookies between runs
+  headful:      env('HEADFUL') === '1',        // visible Chrome; harder for sites to detect
   shardIndex:   int(env('SHARD_INDEX'), 0),
   shardTotal:   int(env('SHARD_TOTAL'), 1),
   only:         env('ONLY') || '',
@@ -308,13 +310,22 @@ async function scrapeOne(browser, site, scriptText, patience = 1) {
   const dlDir = await fsp.mkdtemp(path.join(CFG.outDir, '.dl-'));
   const proxy = parseProxy(site.proxy);
 
-  const context = proxy
-    ? await browser.createBrowserContext({ proxyServer: proxy.server })
-    : await browser.createBrowserContext();
-  const page = await context.newPage();
+  // Browser contexts are incognito, so they discard the persistent profile's
+  // cookies. When one is configured we use the default context instead and scope
+  // downloads per page, which is equally safe for concurrency.
+  const useDefaultContext = !!CFG.userDataDir && !proxy;
+  const context = useDefaultContext
+    ? null
+    : (proxy
+        ? await browser.createBrowserContext({ proxyServer: proxy.server })
+        : await browser.createBrowserContext());
+  const page = context ? await context.newPage() : await browser.newPage();
 
   let evalDone = false, evalError = null, lastActivity = Date.now();
   const pageErrors = [];
+  // Some sites serve the page happily and then refuse the API calls the script
+  // makes. Watching only the first response misses that entirely.
+  let apiDenied = 0, lastDeniedUrl = '';
 
   try {
     if (proxy && proxy.username) await page.authenticate({ username: proxy.username, password: proxy.password });
@@ -343,13 +354,28 @@ async function scrapeOne(browser, site, scriptText, patience = 1) {
     } else {
       page.on('request', () => { lastActivity = Date.now(); });
     }
-    page.on('response', () => { lastActivity = Date.now(); });
+    let siteHost = '';
+    try { siteHost = new URL(site.url).hostname.replace(/^www\./, ''); } catch (e) {}
+    page.on('response', (resp) => {
+      lastActivity = Date.now();
+      const st = resp.status();
+      if (st !== 401 && st !== 403 && st !== 429) return;
+      try {
+        const h = new URL(resp.url()).hostname.replace(/^www\./, '');
+        // only count refusals from the dealer's own domain - third-party trackers
+        // return 403 all the time and mean nothing
+        if (h === siteHost || h.endsWith('.' + siteHost) || siteHost.endsWith('.' + h)) {
+          apiDenied++;
+          lastDeniedUrl = `${st} ${resp.url().slice(0, 110)}`;
+        }
+      } catch (e) {}
+    });
 
     // Scope the download path to THIS context. Browser.setDownloadBehavior is
     // browser-wide by default, so without browserContextId concurrent sites
     // overwrite each other's path and files get claimed by the wrong site.
     const client = await page.createCDPSession();
-    const ctxId = context.id || context._id;
+    const ctxId = context ? (context.id || context._id) : null;
     let scoped = false;
     if (ctxId) {
       try {
@@ -381,11 +407,14 @@ async function scrapeOne(browser, site, scriptText, patience = 1) {
       const hit = await settledDownload(dlDir);
       if (hit) {
         const csv = await fsp.readFile(hit.file, 'utf8');
-        return { name: hit.name, csv, via: 'download', loadStatus, secs: Math.round((Date.now() - t0) / 1000) };
+        return { name: hit.name, csv, via: 'download', loadStatus, apiDenied, secs: Math.round((Date.now() - t0) / 1000) };
       }
       if (evalError) {
-        const e = new Error(`Script threw: ${evalError.message || evalError}`);
-        if (loadStatus >= 400) e.blocked = true;
+        const e = new Error(
+          `Script threw: ${evalError.message || evalError}` +
+          (apiDenied > 0 ? ` | the site refused ${apiDenied} of its own API call(s) - IP block` : '')
+        );
+        if (loadStatus >= 400 || apiDenied > 0) e.blocked = true;
         throw e;
       }
 
@@ -408,19 +437,24 @@ async function scrapeOne(browser, site, scriptText, patience = 1) {
     if (best && best.length > 50) {
       return {
         name: rec.name || defaultName(site), csv: best,
-        via: 'blob-recovery', loadStatus, secs: Math.round((Date.now() - t0) / 1000),
+        via: 'blob-recovery', loadStatus, apiDenied, secs: Math.round((Date.now() - t0) / 1000),
       };
     }
 
     const why = evalDone ? 'script finished but produced no CSV' : 'script never finished';
-    const blocked = loadStatus >= 400 ? ` | page load was HTTP ${loadStatus}, likely bot/geo block` : '';
+    const isBlocked = loadStatus >= 400 || apiDenied > 0;
+    const blocked = loadStatus >= 400
+      ? ` | page load was HTTP ${loadStatus}, likely bot/geo block`
+      : apiDenied > 0
+        ? ` | the site refused ${apiDenied} of its own API call(s) (${lastDeniedUrl}) - IP block, not a script fault`
+        : '';
     const hint = pageErrors.length ? ` | page errors: ${pageErrors.slice(-2).join(' ; ')}` : '';
     const err = new Error(`${why} after ${Math.round((Date.now() - t0) / 1000)}s${blocked}${hint}`);
-    if (loadStatus >= 400) err.blocked = true;
+    if (isBlocked) err.blocked = true;
     throw err;
   } finally {
     await page.close().catch(() => {});
-    await context.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
     await fsp.rm(dlDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -597,7 +631,17 @@ async function main() {
   // Planning pass: work out how many parallel shards this many sites deserves,
   // hand the answer to the workflow, and stop. Needs no browser.
   if (CFG.planOnly) {
-    const rows = await loadRows();
+    let rows = await loadRows();
+
+    // Apply the same "only" filter the shards will, otherwise a 2-site run gets
+    // planned as 8 shards and six of them find nothing to do.
+    if (CFG.only) {
+      const terms = CFG.only.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+      rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
+      console.log(`Filter "${CFG.only.slice(0, 120)}${CFG.only.length > 120 ? '…' : ''}" matched ${rows.length} site(s)`);
+    }
+    if (CFG.limit > 0 && rows.length > CFG.limit) rows = rows.slice(0, CFG.limit);
+
     const n = Math.max(1, Math.min(CFG.maxShards, Math.ceil(rows.length / CFG.sitesPerShard)));
     const list = Array.from({ length: n }, (_, i) => i);
     console.log(`${rows.length} site(s) / ${CFG.sitesPerShard} per shard -> ${n} shard(s)`);
@@ -633,9 +677,12 @@ async function main() {
   // Apps Script cold-starts in ~30s. Launch Chrome while we wait rather than after.
   if (CFG.chromePath) console.log(`Using Chrome at ${CFG.chromePath}`);
   const browserPromise = puppeteer.launch({
-    headless: 'new',
+    headless: CFG.headful ? false : 'new',
     protocolTimeout: CFG.siteTimeout + 120000,
     ...(CFG.chromePath ? { executablePath: CFG.chromePath } : {}),
+    // A persistent profile accumulates cookies across runs, so sites that hand out
+    // a session on first visit stop treating every scrape as a brand-new stranger.
+    ...(CFG.userDataDir ? { userDataDir: CFG.userDataDir } : {}),
     args: [
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled', '--window-size=1440,900',
@@ -680,6 +727,11 @@ async function main() {
     rows = rows.slice(0, CFG.limit);
   }
 
+  if (!rows.length && CFG.shardTotal > 1) {
+    console.log(`Shard ${CFG.shardIndex} of ${CFG.shardTotal} has no sites in its slice. Nothing to do.`);
+    return;
+  }
+
   if (!rows.length) {
     if (!done.size) console.error(
       '\nNo sites to process. A run that scrapes nothing is a failure, not a success.\n' +
@@ -699,6 +751,7 @@ async function main() {
     `${rows.length} site(s), concurrency ${CFG.concurrency}, ` +
     `timeout ${Math.round(CFG.siteTimeout / 1000)}s, up to ${CFG.attempts} attempts, ` +
     `lots ${CFG.lotSize > 0 ? `of ${CFG.lotSize}` : 'OFF'}, ` +
+    `${CFG.headful ? 'headful, ' : ''}${CFG.userDataDir ? 'persistent profile, ' : ''}` +
     `assets ${CFG.blockAssets ? 'blocked' : 'allowed'}` +
     `${CFG.proxyUrl ? ', proxy on' : ''}\n`
   );
@@ -742,8 +795,10 @@ async function main() {
         // Each retry gets 50% more time than the last - a short scrape is usually
         // a script that got cut off, not one that had nothing to find.
         const patience = 1 + (attempt - 1) * 0.5;
-        const { name, csv, via, secs, loadStatus } = await scrapeOne(browser, site, script, patience);
+        const scraped = await scrapeOne(browser, site, script, patience);
+        const { name, csv, via, secs, loadStatus } = scraped;
 
+        const { apiDenied } = scraped;
         const dataRows = Math.max(0, csv.trim().split('\n').length - 1);
 
         // A header-only CSV means the scrape came back with nothing. Uploading it
@@ -752,9 +807,10 @@ async function main() {
         if (dataRows < CFG.minRows) {
           const e = new Error(
             `CSV had ${dataRows} data rows` +
-            (loadStatus >= 400 ? ` | page load was HTTP ${loadStatus}, likely bot/geo block` : '')
+            (loadStatus >= 400 ? ` | page load was HTTP ${loadStatus}, likely bot/geo block` : '') +
+            (apiDenied > 0 ? ` | the site refused ${apiDenied} of its own API call(s) - IP block` : '')
           );
-          if (loadStatus >= 400) e.blocked = true;
+          if (loadStatus >= 400 || apiDenied > 0) e.blocked = true;
           throw e;
         }
 
