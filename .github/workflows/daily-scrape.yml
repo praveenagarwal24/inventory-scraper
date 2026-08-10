@@ -37,6 +37,7 @@ jobs:
           PLAN_ONLY:       '1'
           SHEET_ID:        ${{ secrets.SHEET_ID }}
           SHEET_TAB:       Main
+          SHEET_GID:       '0'
           URL_COL:         L
           SCRIPT_COL:      M
           SITES_PER_SHARD: '25'
@@ -77,6 +78,7 @@ jobs:
         env:
           SHEET_ID:         ${{ secrets.SHEET_ID }}
           SHEET_TAB:        Main
+          SHEET_GID:       '0'
           URL_COL:          L
           SCRIPT_COL:       M
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
