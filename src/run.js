@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-07-sheetfix-1';
+const RUNNER_VERSION = '2026-08-10-summary-1';
 
 // ---------------------------------------------------------------- config
 
@@ -480,7 +480,7 @@ async function postLog(results) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return;
   const rows = results.map((r) => [
     RUN_DATE, new Date().toISOString(), r.url, r.status,
-    r.rows ?? '', r.fileName ?? '', r.secs ?? '', r.error ?? '',
+    r.rows ?? '', r.fileName ?? '', r.secs ?? '', r.error ?? '', r.script ?? '',
   ]);
   await fetch(CFG.appsScriptUrl, {
     method: 'POST',
@@ -720,7 +720,7 @@ async function main() {
   const results = await pool(rows, CFG.concurrency, async (site) => {
     const label = site.name || site.url;
     if (CFG.maxMinutes && Date.now() - started > CFG.maxMinutes * 60000) {
-      return { url: site.url, status: 'skipped', error: 'time budget reached; will resume next run' };
+      return { url: site.url, script: site.scriptLink, status: 'skipped', error: 'time budget reached; will resume next run' };
     }
     if (CFG.stagger && launched < CFG.concurrency) await sleep(launched++ * CFG.stagger);
 
@@ -780,14 +780,14 @@ async function main() {
         if (seenHashes.has(hash)) {
           const twin = seenHashes.get(hash);
           console.log(`DUP   ${label} -> identical to ${twin}, not uploaded again`);
-          return { url: site.url, status: 'duplicate', rows: useRows, fileName: twin, secs };
+          return { url: site.url, script: site.scriptLink, status: 'duplicate', rows: useRows, fileName: twin, secs };
         }
 
         // If today already holds a fuller scrape of this site, leave it alone.
         const prior = manifest.get(site.url);
         if (prior && Number(prior.rows) > useRows) {
           console.log(`KEEP  ${label} -> existing ${prior.rows} rows beats this ${useRows}, not replaced`);
-          return { url: site.url, status: 'kept', rows: Number(prior.rows), fileName: prior.file, secs: best.secs };
+          return { url: site.url, script: site.scriptLink, status: 'kept', rows: Number(prior.rows), fileName: prior.file, secs: best.secs };
         }
 
         // Lot comes from sheet position, but once a site has a lot for today it
@@ -809,7 +809,7 @@ async function main() {
           // The scrape worked; only the upload did not. Re-running the browser
           // would cost minutes and change nothing.
           console.error(`FAIL  ${label} -> scraped ${useRows} rows but upload failed: ${upErr.message}`);
-          return { url: site.url, status: 'failed', rows: useRows, error: `upload: ${upErr.message}` };
+          return { url: site.url, script: site.scriptLink, status: 'failed', rows: useRows, error: `upload: ${upErr.message}` };
         }
 
         await recordManifest({
@@ -820,22 +820,22 @@ async function main() {
         const where = lot ? `${lot}/` : '';
         if (stillLow) {
           console.warn(`LOW   ${label} -> ${where}${fileName} (${useRows} rows, expected ~${expected}) - uploaded, flagged for retry`);
-          return { url: site.url, status: 'low', rows: useRows, expected, fileName, secs: best.secs, via: best.via };
+          return { url: site.url, script: site.scriptLink, status: 'low', rows: useRows, expected, fileName, secs: best.secs, via: best.via };
         }
         console.log(`OK    ${label} -> ${where}${fileName} (${useRows} rows, ${best.secs}s, ${best.via})`);
-        return { url: site.url, status: 'ok', rows: useRows, fileName, secs: best.secs, via: best.via };
+        return { url: site.url, script: site.scriptLink, status: 'ok', rows: useRows, fileName, secs: best.secs, via: best.via };
       } catch (err) {
         const msg = err.message || String(err);
         if (err.blocked) {
           // The site refused us at the network layer. A second identical attempt
           // from the same IP will be refused too - do not pay the timeout twice.
           console.error(`FAIL  ${label} -> ${msg}`);
-          return { url: site.url, status: 'failed', error: msg, blocked: true };
+          return { url: site.url, script: site.scriptLink, status: 'failed', error: msg, blocked: true };
         }
         if (attempt === CFG.attempts || !budgetLeft(attempt + 1)) {
           const why = attempt < CFG.attempts ? ` (gave up after ${Math.round((Date.now() - siteStart) / 1000)}s, budget reached)` : '';
           console.error(`FAIL  ${label} -> ${msg}${why}`);
-          return { url: site.url, status: 'failed', error: msg + why };
+          return { url: site.url, script: site.scriptLink, status: 'failed', error: msg + why };
         }
         console.warn(`retry ${label} (attempt ${attempt}): ${msg}`);
         await sleep(CFG.retryDelay * attempt);
@@ -870,29 +870,44 @@ async function main() {
   if (low.length) {
     console.log('\nRow count well below the last known good figure - data is probably');
     console.log('truncated. Uploaded anyway, and left unmarked so the next run retries:');
-    low.forEach((r) => console.log(`  ${r.url}  ${r.rows} rows (was ~${r.expected})`));
+    low.forEach((r) => {
+      console.log(`  ${r.url}  ${r.rows} rows (was ~${r.expected})`);
+      if (r.script) console.log(`    script: ${r.script}`);
+    });
   }
   if (bad.length) {
     const blocked = bad.filter((r) => r.blocked);
     console.log('\nFailures:');
-    bad.forEach((r) => console.log(`  ${r.url}\n    ${r.error}`));
+    bad.forEach((r) => {
+      console.log(`  ${r.url}`);
+      console.log(`    ${r.error}`);
+      if (r.script) console.log(`    script: ${r.script}`);
+    });
     if (blocked.length) {
       console.log(`\n${blocked.length} of those look like IP-level blocks. A proxy or a`);
       console.log('self-hosted runner is the fix for those, not more retries.');
     }
   }
 
+  const rank = (st) => (st === 'failed' ? 0 : st === 'low' ? 1 : st === 'skipped' ? 2 : 3);
+
   if (process.env.GITHUB_STEP_SUMMARY) {
     const lines = [
       `## Scrape ${RUN_DATE}`, '',
-      `**${ok.length} succeeded, ${bad.length} failed**`, '',
-      '| Site | Status | Rows | Secs | Detail |', '|---|---|---|---|---|',
-      ...results.map((r) => {
+      `**${ok.length} succeeded, ${bad.length} failed**` +
+        `${low.length ? `, ${low.length} suspiciously low` : ''}` +
+        `${dup.length ? `, ${dup.length} duplicate` : ''}`, '',
+      '| Site | Status | Rows | Secs | Script | Detail |',
+      '|---|---|---|---|---|---|',
+      // failures first - that is what anyone opening this page came to see
+      ...[...results].sort((a, b) => rank(a.status) - rank(b.status)).map((r) => {
         const st = r.status === 'ok' ? 'ok'
           : r.status === 'low' ? `LOW (was ~${r.expected})`
           : r.status === 'duplicate' ? 'duplicate'
+          : r.status === 'kept' ? 'kept existing'
           : r.status === 'skipped' ? 'deferred' : 'FAILED';
-        return `| ${r.url} | ${st} | ${r.rows ?? ''} | ${r.secs ?? ''} | ${r.fileName || (r.error || '').slice(0, 120)} |`;
+        const scriptCell = r.script ? `[script](${r.script})` : '';
+        return `| ${r.url} | ${st} | ${r.rows ?? ''} | ${r.secs ?? ''} | ${scriptCell} | ${r.fileName || (r.error || '').slice(0, 160)} |`;
       }),
     ];
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
