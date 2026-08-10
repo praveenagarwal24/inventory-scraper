@@ -38,6 +38,10 @@ jobs:
           SCRIPT_COL:      M
           SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
+          # The plan job must see the same filter the shards will, or a 4-site run
+          # still gets planned as 8 shards and six of them find nothing to do.
+          ONLY:            ${{ github.event.inputs.only }}
+          LIMIT:           ${{ github.event.inputs.limit }}
           LOT_SIZE:        '20'
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:      ${{ secrets.RUN_SECRET }}
