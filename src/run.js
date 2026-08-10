@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-07-lotfix-4';
+const RUNNER_VERSION = '2026-08-07-sheetfix-1';
 
 // ---------------------------------------------------------------- config
 
@@ -134,12 +134,21 @@ async function loadRows() {
   if (/<html/i.test(body.slice(0, 400))) {
     throw new Error('Sheet returned HTML, not CSV. Set sharing to "Anyone with the link - Viewer".');
   }
+  const rawRows = parseCsv(body);
+  console.log(
+    `Read ${(body.length / 1024).toFixed(0)} KB / ${rawRows.length} row(s) from the sheet ` +
+    `via ${CFG.sheetGid ? 'export' : 'gviz'}`
+  );
+  if (!CFG.sheetGid && rawRows.length < 200) {
+    console.warn('The gviz endpoint truncates large sheets. If that row count looks low,');
+    console.warn('set SHEET_GID in the workflow to switch to the export endpoint.');
+  }
 
   const uI = colIndex(CFG.urlCol), sI = colIndex(CFG.scriptCol);
   const nI = CFG.nameCol ? colIndex(CFG.nameCol) : -1;
   const pI = CFG.proxyCol ? colIndex(CFG.proxyCol) : -1;
 
-  const all = parseCsv(body).map((r, i) => ({
+  const all = rawRows.map((r, i) => ({
     rowNumber: i + 1,
     name: (nI >= 0 ? (r[nI] || '') : '').trim(),
     rawUrl: (r[uI] || '').trim(),
@@ -889,7 +898,14 @@ async function main() {
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
   }
 
-  if (bad.length && (CFG.failOnError || ok.length === 0)) process.exit(1);
+  // Sites blocked at the network layer are expected - the self-hosted pickup run
+  // collects those. A run whose only failures are blocks has done its job, so it
+  // should not go red.
+  const realFailures = bad.filter((r) => !r.blocked);
+  if (realFailures.length && (CFG.failOnError || ok.length === 0)) process.exit(1);
+  if (bad.length && !realFailures.length) {
+    console.log('\nAll failures were IP-level blocks; leaving this run green for the pickup job.');
+  }
 }
 
 main().catch((e) => {
