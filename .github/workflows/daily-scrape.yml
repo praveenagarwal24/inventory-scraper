@@ -1,10 +1,6 @@
 name: Daily inventory scrape
 
 on:
-  schedule:
-    # 12:00 UTC = 17:30 IST, Monday to Friday.
-    # Cron is always UTC and India has no DST, so this never drifts.
-    - cron: '0 12 * * 1-5'
   workflow_dispatch:
     inputs:
       only:
@@ -37,7 +33,7 @@ jobs:
           PLAN_ONLY:       '1'
           SHEET_ID:        ${{ secrets.SHEET_ID }}
           SHEET_TAB:       Main
-          SHEET_GID:       '0'
+          SHEET_GID:       '0'      # export endpoint; gviz truncates large sheets
           URL_COL:         L
           SCRIPT_COL:      M
           SITES_PER_SHARD: '25'
@@ -78,7 +74,7 @@ jobs:
         env:
           SHEET_ID:         ${{ secrets.SHEET_ID }}
           SHEET_TAB:        Main
-          SHEET_GID:       '0'
+          SHEET_GID:        '0'     # export endpoint; gviz truncates large sheets
           URL_COL:          L
           SCRIPT_COL:       M
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
