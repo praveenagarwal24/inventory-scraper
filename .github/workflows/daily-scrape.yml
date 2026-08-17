@@ -42,7 +42,7 @@ jobs:
           # still gets planned as 8 shards and six of them find nothing to do.
           ONLY:            ${{ github.event.inputs.only }}
           LIMIT:           ${{ github.event.inputs.limit }}
-          LOT_SIZE:        '20'
+          LOT_SIZE:        '0'      # no Lot folders - CSVs go straight into the date folder
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:      ${{ secrets.RUN_SECRET }}
           TIMEZONE:        America/New_York
@@ -91,7 +91,7 @@ jobs:
           MIN_ROWS_RATIO:   '0.75'   # flag a site returning under 75% of last time
           SHARD_INDEX:      ${{ matrix.shard }}
           SHARD_TOTAL:      ${{ needs.plan.outputs.total }}
-          LOT_SIZE:         '20'
+          LOT_SIZE:         '0'      # no Lot folders - CSVs go straight into the date folder
           MANIFEST_BATCH:   '25'
           KEEP_DAYS:        '7'      # shard 0 trashes date folders older than this
           ATTEMPTS:         '3'
