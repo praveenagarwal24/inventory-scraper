@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-11-nolots-1';
+const RUNNER_VERSION = '2026-08-11-nolowupload-1';
 
 // ---------------------------------------------------------------- config
 
@@ -64,6 +64,7 @@ const CFG = {
   dryRun:       env('DRY_RUN') === '1',
   outDir:       path.resolve(env('OUT_DIR') || 'out'),
   failOnError:  env('FAIL_ON_ERROR') === '1',
+  batch:        env('BATCH') || process.env.GITHUB_RUN_NUMBER || String(Date.now()),
 };
 
 function env(k, required = false) {
@@ -526,10 +527,18 @@ async function upload(fileName, csv, siteUrl, dataRows, low, lot, prior) {
 
 async function postLog(results) {
   if (CFG.dryRun || !CFG.appsScriptUrl) return;
-  const rows = results.map((r) => [
-    RUN_DATE, new Date().toISOString(), r.url, r.status,
-    r.rows ?? '', r.fileName ?? '', r.secs ?? '', r.error ?? '', r.script ?? '',
-  ]);
+  // Batch, Run_Date, Site - url, Status, Rows, Secs, Script, Detail, Output_CSV
+  const rows = results.map((r) => {
+    const detail = r.error ? r.error
+      : r.status === 'low'       ? `below baseline of ~${r.expected} rows - not uploaded`
+      : r.status === 'duplicate' ? `identical to ${r.fileName}`
+      : r.status === 'kept'      ? 'existing file had more rows, not replaced'
+      : (r.via || '');
+    return [
+      CFG.batch, RUN_DATE, r.url, r.status,
+      r.rows ?? '', r.secs ?? '', r.script ?? '', detail, r.csvUrl ?? '',
+    ];
+  });
   await fetch(CFG.appsScriptUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -873,8 +882,22 @@ async function main() {
         seenHashes.set(hash, fileName);
 
         await fsp.writeFile(path.join(CFG.outDir, fileName), useCsv, 'utf8');
+
+        // A short scrape is almost certainly truncated, so it does not go to Drive.
+        // The local copy stays in the run artifact if you want to look at it, and the
+        // site is left unrecorded so the next run tries again.
+        if (stillLow) {
+          console.warn(`LOW   ${label} -> ${useRows} rows vs ~${expected} expected - not uploaded`);
+          return {
+            url: site.url, script: site.scriptLink, status: 'low',
+            rows: useRows, expected, secs: best.secs, via: best.via,
+          };
+        }
+
+        let csvUrl = '';
         try {
-          await upload(fileName, useCsv, site.url, useRows, stillLow, lot, prior);
+          const up = await upload(fileName, useCsv, site.url, useRows, stillLow, lot, prior);
+          csvUrl = (up && up.url) || '';
         } catch (upErr) {
           // The scrape worked; only the upload did not. Re-running the browser
           // would cost minutes and change nothing.
@@ -888,12 +911,8 @@ async function main() {
         manifest.set(site.url, { file: fileName, lot: lot || '', rows: useRows, low: !!stillLow });
 
         const where = lot ? `${lot}/` : '';
-        if (stillLow) {
-          console.warn(`LOW   ${label} -> ${where}${fileName} (${useRows} rows, expected ~${expected}) - uploaded, flagged for retry`);
-          return { url: site.url, script: site.scriptLink, status: 'low', rows: useRows, expected, fileName, secs: best.secs, via: best.via };
-        }
         console.log(`OK    ${label} -> ${where}${fileName} (${useRows} rows, ${best.secs}s, ${best.via})`);
-        return { url: site.url, script: site.scriptLink, status: 'ok', rows: useRows, fileName, secs: best.secs, via: best.via };
+        return { url: site.url, script: site.scriptLink, status: 'ok', rows: useRows, fileName, csvUrl, secs: best.secs, via: best.via };
       } catch (err) {
         const msg = err.message || String(err);
         if (err.blocked) {
@@ -939,7 +958,7 @@ async function main() {
   );
   if (low.length) {
     console.log('\nRow count well below the last known good figure - data is probably');
-    console.log('truncated. Uploaded anyway, and left unmarked so the next run retries:');
+    console.log('truncated, so these were NOT uploaded. The next run will try again:');
     low.forEach((r) => {
       console.log(`  ${r.url}  ${r.rows} rows (was ~${r.expected})`);
       if (r.script) console.log(`    script: ${r.script}`);
