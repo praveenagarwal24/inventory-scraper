@@ -51,6 +51,7 @@ jobs:
         env:
           SHEET_ID:         ${{ secrets.SHEET_ID }}
           SHEET_TAB:        Main
+          SHEET_GID:        '0'     # export endpoint; gviz truncates large sheets
           URL_COL:          L
           SCRIPT_COL:       M
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
@@ -69,7 +70,7 @@ jobs:
           RETRY_DELAY_MS:   '10000'
           BLOCK_ASSETS:     '0'      # request interception can break site scripts
           USER_DATA_DIR:    '/tmp/scraper-chrome-profile'  # keeps cookies between runs
-          LOT_SIZE:         '0'      # match the cloud run
+          LOT_SIZE:         '0'      # no Lot folders - CSVs go straight into the date folder
           MAX_MINUTES:      '40'     # stop starting new sites after this; resume next run
 
           ONLY:             ${{ github.event.inputs.only }}
