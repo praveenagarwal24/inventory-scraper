@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-11-realbrowser-1';
+const RUNNER_VERSION = '2026-08-11-nolots-1';
 
 // ---------------------------------------------------------------- config
 
@@ -123,6 +123,20 @@ function normaliseUrl(raw) {
   if (/^https?:\/\//i.test(v)) return v;
   if (/^[a-z0-9][\w-]*(\.[\w-]+)+(\/|$|\?)/i.test(v)) return 'https://' + v;
   return '';
+}
+
+/**
+ * The picker sends whole URLs; a person typing in the Actions box sends fragments
+ * like "russdarrow". Treat a term starting with http as an exact site match so one
+ * selected URL can never drag in a longer one that happens to contain it.
+ */
+function matchesFilter(row, terms) {
+  const norm = (u) => String(u || '').trim().toLowerCase().replace(/\/+$/, '');
+  const url = norm(row.url);
+  const hay = `${row.url} ${row.name}`.toLowerCase();
+  return terms.some((t) =>
+    /^https?:\/\//.test(t) ? norm(t) === url : hay.includes(t)
+  );
 }
 
 async function loadRows() {
@@ -637,8 +651,8 @@ async function main() {
     // planned as 8 shards and six of them find nothing to do.
     if (CFG.only) {
       const terms = CFG.only.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
-      rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
-      console.log(`Filter "${CFG.only.slice(0, 120)}${CFG.only.length > 120 ? '…' : ''}" matched ${rows.length} site(s)`);
+      rows = rows.filter((r) => matchesFilter(r, terms));
+      console.log(`Filter matched ${rows.length} of ${terms.length} term(s) requested`);
     }
     if (CFG.limit > 0 && rows.length > CFG.limit) rows = rows.slice(0, CFG.limit);
 
@@ -694,15 +708,15 @@ async function main() {
 
   if (CFG.only) {
     const terms = CFG.only.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
-    rows = rows.filter((r) => terms.some((t) => `${r.url} ${r.name}`.toLowerCase().includes(t)));
-    console.log(`Filter "${CFG.only}" matched ${rows.length} site(s)`);
+    rows = rows.filter((r) => matchesFilter(r, terms));
+    console.log(`Filter matched ${rows.length} of ${terms.length} term(s) requested`);
+    if (rows.length > terms.length) {
+      console.warn('More sites matched than terms given - check for duplicate sheet rows.');
+    }
   }
   await preflight();
 
-  if (CFG.lotSize <= 0) {
-    console.warn('\n!! LOT_SIZE is 0 for this job, so every file goes straight into the');
-    console.warn('!! date folder. Set LOT_SIZE in the scrape job to match the plan job.\n');
-  }
+
 
   // Sharded runs get their folders from the plan job. A single-job run - the Mac
   // pickup - has no plan job, so it prepares its own. Either way, exactly one
