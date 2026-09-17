@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-11-nolowupload-1';
+const RUNNER_VERSION = '2026-08-11-retrypass-1';
 
 // ---------------------------------------------------------------- config
 
@@ -50,6 +50,7 @@ const CFG = {
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
   keepDays:     int(env('KEEP_DAYS'), 0),       // trash date folders older than this
   planOnly:     env('PLAN_ONLY') === '1',       // count sites, emit a shard plan, exit
+  planPending:  env('PLAN_PENDING') === '1',    // plan only what is still missing from Drive
   sitesPerShard:int(env('SITES_PER_SHARD'), 25),  // small, so we use the shard budget
   maxShards:    int(env('MAX_SHARDS'), 20),     // GitHub Free allows 20 concurrent jobs
   shardDelay:   int(env('SHARD_DELAY_MS'), 2000),// stagger shard startup
@@ -664,6 +665,23 @@ async function main() {
       console.log(`Filter matched ${rows.length} of ${terms.length} term(s) requested`);
     }
     if (CFG.limit > 0 && rows.length > CFG.limit) rows = rows.slice(0, CFG.limit);
+
+    // For the retry pass: plan around what Drive is still missing, not the whole sheet.
+    if (CFG.planPending) {
+      const manifest = await fetchManifest();
+      const done = new Set([...manifest.entries()].filter(([, v]) => !v.low).map(([k]) => k));
+      const before = rows.length;
+      rows = rows.filter((r) => !done.has(r.url));
+      console.log(`${done.size} site(s) already in Drive for ${RUN_DATE}; ${rows.length} of ${before} still pending`);
+
+      if (!rows.length) {
+        console.log('Nothing outstanding - the retry pass will be skipped.');
+        if (process.env.GITHUB_OUTPUT) {
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `shards=[]\ntotal=0\nsites=0\n`);
+        }
+        return;
+      }
+    }
 
     const n = Math.max(1, Math.min(CFG.maxShards, Math.ceil(rows.length / CFG.sitesPerShard)));
     const list = Array.from({ length: n }, (_, i) => i);
