@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-11-retrypass-1';
+const RUNNER_VERSION = '2026-09-17-stealth-1';
 
 // ---------------------------------------------------------------- config
 
@@ -66,6 +66,7 @@ const CFG = {
   outDir:       path.resolve(env('OUT_DIR') || 'out'),
   failOnError:  env('FAIL_ON_ERROR') === '1',
   batch:        env('BATCH') || process.env.GITHUB_RUN_NUMBER || String(Date.now()),
+  passLabel:    env('PASS_LABEL') || '',
 };
 
 function env(k, required = false) {
@@ -281,6 +282,53 @@ async function fetchScript(link) {
 // ---------------------------------------------------------------- browser
 
 const SHIM = () => {
+  // Automation fingerprints that anti-bot scripts check before anything else.
+  // Puppeteer leaves all of these set to headless-looking values by default.
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+
+    // headless reports zero plugins and zero mime types
+    const fakePlugins = [
+      { name: 'PDF Viewer', filename: 'internal-pdf-viewer' },
+      { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
+      { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' },
+      { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer' },
+      { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer' },
+    ];
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => Object.assign(fakePlugins, { length: fakePlugins.length }),
+    });
+    Object.defineProperty(navigator, 'mimeTypes', { get: () => ({ length: 2 }) });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+    // headless commonly reports 0 or 1 here
+    if (!navigator.hardwareConcurrency || navigator.hardwareConcurrency < 4) {
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    }
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+    // SwiftShader in the renderer string is a dead giveaway
+    const gl = WebGLRenderingContext.prototype;
+    const origParam = gl.getParameter;
+    gl.getParameter = function (p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return origParam.apply(this, arguments);
+    };
+
+    // headless resolves Notification.permission inconsistently with the query API
+    const origQuery = navigator.permissions && navigator.permissions.query;
+    if (origQuery) {
+      navigator.permissions.query = (p) =>
+        p && p.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : origQuery.call(navigator.permissions, p);
+    }
+  } catch (e) {}
+
   window.__CAPTURED_BLOBS__ = [];
   window.__DL_NAME__ = null;
   try {
@@ -350,6 +398,9 @@ async function scrapeOne(browser, site, scriptText, patience = 1) {
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
       'Upgrade-Insecure-Requests': '1',
+      'sec-ch-ua': '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"macOS"',
     });
     await page.evaluateOnNewDocument(SHIM);
 
@@ -535,8 +586,10 @@ async function postLog(results) {
       : r.status === 'duplicate' ? `identical to ${r.fileName}`
       : r.status === 'kept'      ? 'existing file had more rows, not replaced'
       : (r.via || '');
+    // 'ok' = landed first time, 'done' = recovered by a later pass
+    const shown = r.status === 'ok' ? (CFG.passLabel ? 'done' : 'ok') : r.status;
     return [
-      CFG.batch, RUN_DATE, r.url, r.status,
+      CFG.batch, RUN_DATE, r.url, shown,
       r.rows ?? '', r.secs ?? '', r.script ?? '', detail, r.csvUrl ?? '',
     ];
   });
@@ -669,6 +722,18 @@ async function main() {
     // For the retry pass: plan around what Drive is still missing, not the whole sheet.
     if (CFG.planPending) {
       const manifest = await fetchManifest();
+      if (!manifest.size) {
+        // An empty manifest here means the lookup failed, not that nothing was
+        // collected - the first pass has just run. Planning the whole sheet on
+        // that basis spawns MAX_SHARDS jobs that mostly find nothing to do.
+        console.error('\nManifest lookup returned nothing, so the pending count is unknown.');
+        console.error('Refusing to plan a retry over the whole sheet. Check APPS_SCRIPT_URL');
+        console.error('and RUN_SECRET on this job, and that /exec reports ok:true.');
+        if (process.env.GITHUB_OUTPUT) {
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `shards=[]\ntotal=0\nsites=0\n`);
+        }
+        return;
+      }
       const done = new Set([...manifest.entries()].filter(([, v]) => !v.low).map(([k]) => k));
       const before = rows.length;
       rows = rows.filter((r) => !done.has(r.url));
@@ -724,9 +789,13 @@ async function main() {
     // A persistent profile accumulates cookies across runs, so sites that hand out
     // a session on first visit stop treating every scrape as a brand-new stranger.
     ...(CFG.userDataDir ? { userDataDir: CFG.userDataDir } : {}),
+    // Chrome advertises automation unless this default arg is dropped.
+    ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled', '--window-size=1440,900',
+      '--disable-infobars', '--no-default-browser-check', '--no-first-run',
+      '--lang=en-US,en', '--disable-features=IsolateOrigins,site-per-process',
     ],
   });
 
@@ -966,6 +1035,14 @@ async function main() {
   const dup = results.filter((r) => r.status === 'duplicate');
   const skipped = results.filter((r) => r.status === 'skipped');
   const bad = results.filter((r) => r.status === 'failed');
+  if (CFG.passLabel) {
+    console.log(`\n${CFG.passLabel}: recovered ${ok.length} of ${rows.length} site(s) that were still missing.`);
+    if (!ok.length) {
+      console.log('None recovered. If the failures below are IP blocks, a second attempt');
+      console.log('from the same runners will keep failing - the IP is what needs to change.');
+    }
+  }
+
   console.log(
     `\n${ok.length} succeeded, ${bad.length} failed` +
     `${low.length ? `, ${low.length} suspiciously low` : ''}` +
