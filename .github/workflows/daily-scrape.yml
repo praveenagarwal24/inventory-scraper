@@ -169,6 +169,11 @@ jobs:
           key: puppeteer-${{ runner.os }}-${{ hashFiles('package.json') }}
       - run: npm install
 
+      # A real, visible Chrome inside a virtual display. Far harder for anti-bot
+      # systems to spot than headless, and free on GitHub's runners.
+      - name: Install Xvfb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
       - name: Retry what is still missing
         env:
           SHEET_ID:         ${{ secrets.SHEET_ID }}
@@ -192,6 +197,7 @@ jobs:
           NAV_TIMEOUT_MS:   '60000'
           MAX_MINUTES:      '10'       # stop starting new sites after this
           MIN_ROWS_RATIO:   '0.75'
+          PASS_LABEL:       'Retry pass'
 
           SHARD_INDEX:      ${{ matrix.shard }}
           SHARD_TOTAL:      ${{ needs.replan.outputs.total }}
@@ -200,7 +206,9 @@ jobs:
           ONLY:             ${{ github.event.inputs.only }}
           LIMIT:            ${{ github.event.inputs.limit }}
           SKIP_EXISTING:    '1'        # always skip what the first pass landed
-        run: node src/run.js
+          HEADFUL:          '1'        # real Chrome, not headless
+          USER_DATA_DIR:    '/tmp/retry-chrome-profile'
+        run: xvfb-run -a --server-args="-screen 0 1440x900x24" node src/run.js
 
       - name: Keep a copy of the CSVs for debugging
         if: always()
