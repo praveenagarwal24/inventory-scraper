@@ -112,3 +112,101 @@ jobs:
           path: out/
           retention-days: 2
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------- retry pass
+  # A second, more patient attempt at whatever the first pass did not land.
+  # It needs no list: the manifest already knows what is missing.
+
+  replan:
+    needs: scrape
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.replan.outputs.shards }}
+      total:  ${{ steps.replan.outputs.total }}
+      sites:  ${{ steps.replan.outputs.sites }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: replan
+        env:
+          PLAN_ONLY:       '1'
+          PLAN_PENDING:    '1'      # count only what Drive is still missing
+          SHEET_ID:        ${{ secrets.SHEET_ID }}
+          SHEET_TAB:       Main
+          SHEET_GID:       '0'
+          URL_COL:         L
+          SCRIPT_COL:      M
+          SITES_PER_SHARD: '10'     # smaller slices, so the retry finishes quickly
+          MAX_SHARDS:      '20'
+          ONLY:            ${{ github.event.inputs.only }}
+          LIMIT:           ${{ github.event.inputs.limit }}
+          LOT_SIZE:        '0'
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:      ${{ secrets.RUN_SECRET }}
+          TIMEZONE:        America/New_York
+        run: node src/run.js
+
+  retry:
+    needs: replan
+    # An empty matrix means nothing was outstanding, and this job simply does not run.
+    if: always() && needs.replan.outputs.total != '0' && needs.replan.outputs.total != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.replan.outputs.shards) }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Cache Chrome
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-${{ runner.os }}-${{ hashFiles('package.json') }}
+      - run: npm install
+
+      - name: Retry what is still missing
+        env:
+          SHEET_ID:         ${{ secrets.SHEET_ID }}
+          SHEET_TAB:        Main
+          SHEET_GID:        '0'
+          URL_COL:          L
+          SCRIPT_COL:       M
+          APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:       ${{ secrets.RUN_SECRET }}
+          TIMEZONE:         America/New_York
+
+          # Slower and more patient than the first pass, and closer to a real
+          # browser: no request interception, fewer sites at once, longer waits.
+          CONCURRENCY:      '4'
+          SITE_TIMEOUT_MS:  '300000'
+          SITE_BUDGET_MS:   '330000'   # one full 5-minute attempt, then stop
+          IDLE_GRACE_MS:    '20000'
+          ATTEMPTS:         '2'
+          RETRY_DELAY_MS:   '10000'
+          BLOCK_ASSETS:     '0'
+          NAV_TIMEOUT_MS:   '60000'
+          MAX_MINUTES:      '10'       # stop starting new sites after this
+          MIN_ROWS_RATIO:   '0.75'
+
+          SHARD_INDEX:      ${{ matrix.shard }}
+          SHARD_TOTAL:      ${{ needs.replan.outputs.total }}
+          LOT_SIZE:         '0'
+          MANIFEST_BATCH:   '25'
+          ONLY:             ${{ github.event.inputs.only }}
+          LIMIT:            ${{ github.event.inputs.limit }}
+          SKIP_EXISTING:    '1'        # always skip what the first pass landed
+        run: node src/run.js
+
+      - name: Keep a copy of the CSVs for debugging
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retry-csvs-${{ github.run_number }}-shard${{ matrix.shard }}
+          path: out/
+          retention-days: 2
+          if-no-files-found: ignore
