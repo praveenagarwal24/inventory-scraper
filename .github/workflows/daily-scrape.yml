@@ -112,3 +112,21 @@ jobs:
           path: out/
           retention-days: 2
           if-no-files-found: ignore
+
+  # Once every shard is finished, group the day's CSVs into LOT_xxx folders by
+  # row count. Apps Script does the packing and moving; this job just drives it.
+  lots:
+    needs: scrape
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack CSVs into lots
+        env:
+          LOTS_ONLY:       '1'
+          SHEET_ID:        ${{ secrets.SHEET_ID }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:      ${{ secrets.RUN_SECRET }}
+          TIMEZONE:        America/New_York
+        run: node src/run.js
