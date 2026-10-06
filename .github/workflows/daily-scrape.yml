@@ -16,6 +16,22 @@ on:
         type: boolean
         required: false
         default: false
+      sheet_id:
+        description: 'Sheet id (blank = the SHEET_ID secret)'
+        required: false
+        default: ''
+      sheet_tab:
+        description: 'Tab name (blank = Main)'
+        required: false
+        default: ''
+      url_col:
+        description: 'Column holding the site URL (blank = L)'
+        required: false
+        default: ''
+      script_col:
+        description: 'Column holding the Drive script link (blank = M)'
+        required: false
+        default: ''
 
 jobs:
   # Counts the sites in the sheet and decides how many parallel shards to run.
@@ -31,11 +47,11 @@ jobs:
       - id: plan
         env:
           PLAN_ONLY:       '1'
-          SHEET_ID:        ${{ secrets.SHEET_ID }}
-          SHEET_TAB:       Main
+          SHEET_ID:        ${{ github.event.inputs.sheet_id || secrets.SHEET_ID }}
+          SHEET_TAB:       ${{ github.event.inputs.sheet_tab || 'Main' }}
           SHEET_GID:       '0'      # export endpoint; gviz truncates large sheets
-          URL_COL:         L
-          SCRIPT_COL:      M
+          URL_COL:         ${{ github.event.inputs.url_col || 'L' }}
+          SCRIPT_COL:      ${{ github.event.inputs.script_col || 'M' }}
           SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
           # The plan job must see the same filter the shards will, or a 4-site run
@@ -76,11 +92,11 @@ jobs:
 
       - name: Run scrapers
         env:
-          SHEET_ID:         ${{ secrets.SHEET_ID }}
-          SHEET_TAB:        Main
+          SHEET_ID:         ${{ github.event.inputs.sheet_id || secrets.SHEET_ID }}
+          SHEET_TAB:        ${{ github.event.inputs.sheet_tab || 'Main' }}
           SHEET_GID:        '0'     # export endpoint; gviz truncates large sheets
-          URL_COL:          L
-          SCRIPT_COL:       M
+          URL_COL:          ${{ github.event.inputs.url_col || 'L' }}
+          SCRIPT_COL:       ${{ github.event.inputs.script_col || 'M' }}
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
@@ -125,7 +141,7 @@ jobs:
       - name: Pack CSVs into lots
         env:
           LOTS_ONLY:       '1'
-          SHEET_ID:        ${{ secrets.SHEET_ID }}
+          SHEET_ID:        ${{ github.event.inputs.sheet_id || secrets.SHEET_ID }}
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:      ${{ secrets.RUN_SECRET }}
           TIMEZONE:        America/New_York
