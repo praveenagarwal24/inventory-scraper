@@ -32,6 +32,14 @@ on:
         description: 'Column holding the Drive script link (blank = M)'
         required: false
         default: ''
+      filter_col:
+        description: 'Optional column to filter rows on, e.g. S'
+        required: false
+        default: ''
+      filter_value:
+        description: 'Only scrape rows whose filter column matches this'
+        required: false
+        default: ''
 
 jobs:
   # Counts the sites in the sheet and decides how many parallel shards to run.
@@ -52,6 +60,8 @@ jobs:
           SHEET_GID:       '0'      # export endpoint; gviz truncates large sheets
           URL_COL:         ${{ github.event.inputs.url_col || 'L' }}
           SCRIPT_COL:      ${{ github.event.inputs.script_col || 'M' }}
+          FILTER_COL:      ${{ github.event.inputs.filter_col }}
+          FILTER_VALUE:    ${{ github.event.inputs.filter_value }}
           SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
           # The plan job must see the same filter the shards will, or a 4-site run
@@ -97,6 +107,8 @@ jobs:
           SHEET_GID:        '0'     # export endpoint; gviz truncates large sheets
           URL_COL:          ${{ github.event.inputs.url_col || 'L' }}
           SCRIPT_COL:       ${{ github.event.inputs.script_col || 'M' }}
+          FILTER_COL:       ${{ github.event.inputs.filter_col }}
+          FILTER_VALUE:     ${{ github.event.inputs.filter_value }}
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York
