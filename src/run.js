@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-09-28-lotpack-1';
+const RUNNER_VERSION = '2026-10-06-filter-1';
 
 // ---------------------------------------------------------------- config
 
@@ -27,6 +27,8 @@ const CFG = {
   sheetGid:     env('SHEET_GID') || '',
   urlCol:       env('URL_COL') || 'L',
   scriptCol:    env('SCRIPT_COL') || 'M',
+  filterCol:    env('FILTER_COL') || '',       // optional: only rows where
+  filterValue:  env('FILTER_VALUE') || '',     // this column matches are scraped
   nameCol:      env('NAME_COL') || '',
   proxyCol:     env('PROXY_COL') || '',        // optional per-site proxy column
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
@@ -163,6 +165,10 @@ async function loadRows() {
   }
 
   const uI = colIndex(CFG.urlCol), sI = colIndex(CFG.scriptCol);
+  const fI = CFG.filterCol ? colIndex(CFG.filterCol) : -1;
+  const wanted = CFG.filterValue
+    ? CFG.filterValue.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean)
+    : [];
   const nI = CFG.nameCol ? colIndex(CFG.nameCol) : -1;
   const pI = CFG.proxyCol ? colIndex(CFG.proxyCol) : -1;
 
@@ -173,11 +179,17 @@ async function loadRows() {
     url: normaliseUrl(r[uI]),
     scriptLink: (r[sI] || '').trim(),
     proxy: (pI >= 0 ? (r[pI] || '') : '').trim() || CFG.proxyUrl,
+    raw: r,
   }));
 
   const usable = [];
-  const skipped = { noScript: 0, noUrl: 0, badUrl: [] };
+  const skipped = { noScript: 0, noUrl: 0, badUrl: [], filtered: 0 };
   for (const r of all) {
+    // Optional row filter, e.g. only rows whose column S reads "Active".
+    if (fI >= 0 && wanted.length) {
+      const cell = String(r.raw[fI] == null ? '' : r.raw[fI]).trim().toLowerCase();
+      if (wanted.indexOf(cell) === -1) { skipped.filtered++; continue; }
+    }
     const hasScript = /^https?:\/\//i.test(r.scriptLink);
     if (!hasScript) { if (r.rawUrl) skipped.noScript++; continue; }
     if (!r.url) {
@@ -207,6 +219,9 @@ async function loadRows() {
 
   const fixed = usable.filter((r) => r.url !== r.rawUrl).length;
   if (fixed) console.log(`Added https:// to ${fixed} URL(s) written without a scheme`);
+  if (skipped.filtered) {
+    console.log(`Filter ${CFG.filterCol}="${CFG.filterValue}" excluded ${skipped.filtered} row(s)`);
+  }
   if (skipped.noScript) console.log(`Skipped ${skipped.noScript} row(s) with a URL but no script link`);
   if (skipped.noUrl) console.log(`Skipped ${skipped.noUrl} row(s) with a script but no URL`);
   if (skipped.badUrl.length) {
