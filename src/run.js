@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-08-11-nolowupload-1';
+const RUNNER_VERSION = '2026-09-28-lotpack-1';
 
 // ---------------------------------------------------------------- config
 
@@ -50,6 +50,7 @@ const CFG = {
   maxMinutes:   int(env('MAX_MINUTES'), 0),     // stop starting new sites after this
   keepDays:     int(env('KEEP_DAYS'), 0),       // trash date folders older than this
   planOnly:     env('PLAN_ONLY') === '1',       // count sites, emit a shard plan, exit
+  lotsOnly:     env('LOTS_ONLY') === '1',       // pack today's CSVs into lots, exit
   sitesPerShard:int(env('SITES_PER_SHARD'), 25),  // small, so we use the shard budget
   maxShards:    int(env('MAX_SHARDS'), 20),     // GitHub Free allows 20 concurrent jobs
   shardDelay:   int(env('SHARD_DELAY_MS'), 2000),// stagger shard startup
@@ -650,6 +651,26 @@ async function pool(items, size, worker) {
 async function main() {
   await fsp.mkdir(CFG.outDir, { recursive: true });
   console.log(`runner ${RUNNER_VERSION} | run date ${RUN_DATE} (${CFG.timezone})`);
+
+  // Lot pass: once everything is scraped, group the day's CSVs into LOT_xxx
+  // folders by row count. Needs no browser, and Apps Script does the work -
+  // we just keep asking until it reports nothing left to move.
+  if (CFG.lotsOnly) {
+    if (!CFG.appsScriptUrl) { console.error('APPS_SCRIPT_URL is not set.'); process.exit(2); }
+    let movedTotal = 0;
+    for (let call = 1; call <= 12; call++) {
+      const r = await postToWebApp({ secret: CFG.runSecret, action: 'lots', date: RUN_DATE });
+      movedTotal += r.moved || 0;
+      console.log(`pass ${call}: moved ${r.moved || 0}, ${r.remaining || 0} left, ${r.lots || 0} lot(s)`);
+      if (r.errors && r.errors.length) r.errors.forEach((e) => console.warn(`  ${e}`));
+      if (!r.remaining) {
+        console.log(`\nDone. ${movedTotal} file(s) filed into ${r.lots || 0} lot(s) [web app ${r.version || 'UNKNOWN'}]`);
+        return;
+      }
+    }
+    console.warn('\nStill files left to move after 12 passes - run the workflow again to finish.');
+    return;
+  }
 
   // Planning pass: work out how many parallel shards this many sites deserves,
   // hand the answer to the workflow, and stop. Needs no browser.
