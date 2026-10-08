@@ -750,6 +750,13 @@ async function main() {
 
   let rows = await loadRows();
   console.log(`Sheet returned ${rows.length} usable row(s)`);
+  // Lots are numbered by position in the FULL sheet (see loadRows), so the
+  // highest lot in play is ceil(fullSiteCount / LOT_SIZE) regardless of any
+  // later filtering. Capture it now, before `only`/`done`/shard filters shrink
+  // `rows`, so prepareFolders() always creates every lot folder a surviving
+  // site (or its prior.lot) can reference. Preparing with the filtered count
+  // stranded files in the date folder on targeted/pickup runs.
+  const fullSiteCount = rows.length;
 
   if (CFG.only) {
     const terms = CFG.only.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
@@ -767,7 +774,7 @@ async function main() {
   // pickup - has no plan job, so it prepares its own. Either way, exactly one
   // serialised call creates folders before any parallel work begins.
   if (CFG.shardTotal === 1) {
-    try { await prepareFolders(rows.length); }
+    try { await prepareFolders(fullSiteCount); }
     catch (e) { console.warn(`Prepare failed: ${e.message}`); }
   }
 
