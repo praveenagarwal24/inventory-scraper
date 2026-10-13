@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-10-14-exclude-churned';
+const RUNNER_VERSION = '2026-10-14-segment-folders';
 
 // ---------------------------------------------------------------- config
 
@@ -31,6 +31,7 @@ const CFG = {
   filterValue:  env('FILTER_VALUE') || '',     // this column matches are scraped
   excludeCol:   env('EXCLUDE_COL') || 'X',     // optional: drop rows whose Stage (col X)
   excludeValue: env('EXCLUDE_VALUE') || 'Churn,Churned', // matches any of these are skipped
+  segCol:       env('SEG_COL') || 'G',         // customer segment -> <segment>/ Drive sub-folder
   nameCol:      env('NAME_COL') || '',
   proxyCol:     env('PROXY_COL') || '',        // optional per-site proxy column
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
@@ -177,6 +178,7 @@ async function loadRows() {
     : [];
   const nI = CFG.nameCol ? colIndex(CFG.nameCol) : -1;
   const pI = CFG.proxyCol ? colIndex(CFG.proxyCol) : -1;
+  const gI = CFG.segCol ? colIndex(CFG.segCol) : -1;
 
   const all = rawRows.map((r, i) => ({
     rowNumber: i + 1,
@@ -185,6 +187,8 @@ async function loadRows() {
     url: normaliseUrl(r[uI]),
     scriptLink: (r[sI] || '').trim(),
     proxy: (pI >= 0 ? (r[pI] || '') : '').trim() || CFG.proxyUrl,
+    // Customer segment -> Drive sub-folder. Blank/unknown becomes "Others".
+    segment: (gI >= 0 ? String(r[gI] || '').trim() : '') || 'Others',
     raw: r,
   }));
 
@@ -957,6 +961,7 @@ async function main() {
 
         await recordManifest({
           site: site.url, file: fileName, lot: lot || '', rows: useRows, low: !!stillLow,
+          seg: site.segment || 'Others',
         });
         manifest.set(site.url, { file: fileName, lot: lot || '', rows: useRows, low: !!stillLow });
 
