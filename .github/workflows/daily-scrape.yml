@@ -171,3 +171,21 @@ jobs:
           RUN_SECRET:      ${{ secrets.RUN_SECRET }}
           TIMEZONE:        America/New_York
         run: node src/run.js
+
+      # Auto-notify #team-production-catalog once lots are created. Uses the same
+      # Slack session tokens as the qc-hold bot (work from GitHub's cloud IP).
+      - name: Notify Slack
+        if: success()
+        env:
+          SLACK_XOXC:    ${{ secrets.SLACK_XOXC }}
+          SLACK_XOXD:    ${{ secrets.SLACK_XOXD }}
+          SLACK_CHANNEL: C0996AMFQRZ
+        run: |
+          if [ -z "$SLACK_XOXC" ]; then echo "No Slack token set; skipping notify"; exit 0; fi
+          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_XOXC" \
+            -H "Cookie: d=$SLACK_XOXD" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            --data '{"channel":"'"$SLACK_CHANNEL"'","text":"Lots created, plz pick\ncc: <@U03PHN8VABB>","unfurl_links":false}')
+          echo "$resp" | head -c 400
+          echo "$resp" | grep -q '"ok":true' || { echo; echo "Slack post failed"; exit 1; }
