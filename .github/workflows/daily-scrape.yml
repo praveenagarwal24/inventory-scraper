@@ -177,15 +177,30 @@ jobs:
       - name: Notify Slack
         if: success()
         env:
-          SLACK_XOXC:    ${{ secrets.SLACK_XOXC }}
-          SLACK_XOXD:    ${{ secrets.SLACK_XOXD }}
-          SLACK_CHANNEL: C0996AMFQRZ
+          SLACK_XOXC:      ${{ secrets.SLACK_XOXC }}
+          SLACK_XOXD:      ${{ secrets.SLACK_XOXD }}
+          SLACK_CHANNEL:   C0996AMFQRZ
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          RUN_SECRET:      ${{ secrets.RUN_SECRET }}
         run: |
           if [ -z "$SLACK_XOXC" ]; then echo "No Slack token set; skipping notify"; exit 0; fi
+          RUN_DATE=$(TZ=America/New_York date +%F)
+          # Ask the Apps Script for the formatted message (table of files/lots/failed
+          # per segment). Fall back to a plain message if it can't be built.
+          text=$(curl -sSL -X POST "$APPS_SCRIPT_URL" \
+            -H "Content-Type: application/json" \
+            --data "{\"secret\":\"$RUN_SECRET\",\"action\":\"slacktext\",\"date\":\"$RUN_DATE\"}" \
+            | jq -r '.text // empty')
+          if [ -z "$text" ]; then
+            echo "web app returned no text; using fallback message"
+            text=$'Lots created, plz pick\ncc: <@U03PHN8VABB>'
+          fi
+          payload=$(jq -n --arg c "$SLACK_CHANNEL" --arg t "$text" \
+            '{channel:$c,text:$t,unfurl_links:false}')
           resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $SLACK_XOXC" \
             -H "Cookie: d=$SLACK_XOXD" \
             -H "Content-Type: application/json; charset=utf-8" \
-            --data '{"channel":"'"$SLACK_CHANNEL"'","text":"Lots created, plz pick\ncc: <@U03PHN8VABB>","unfurl_links":false}')
-          echo "$resp" | head -c 400
+            --data "$payload")
+          echo "$resp" | head -c 300
           echo "$resp" | grep -q '"ok":true' || { echo; echo "Slack post failed"; exit 1; }
