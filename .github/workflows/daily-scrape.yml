@@ -40,6 +40,14 @@ on:
         description: 'Only scrape rows whose filter column matches this'
         required: false
         default: ''
+      exclude_col:
+        description: 'Column to exclude rows on, e.g. X (Stage)'
+        required: false
+        default: 'X'
+      exclude_value:
+        description: 'Skip rows whose exclude column matches any of these (comma-separated)'
+        required: false
+        default: 'Churn,Churned'
 
 jobs:
   # Counts the sites in the sheet and decides how many parallel shards to run.
@@ -62,6 +70,8 @@ jobs:
           SCRIPT_COL:      ${{ github.event.inputs.script_col || 'M' }}
           FILTER_COL:      ${{ github.event.inputs.filter_col }}
           FILTER_VALUE:    ${{ github.event.inputs.filter_value }}
+          EXCLUDE_COL:     ${{ github.event.inputs.exclude_col || 'X' }}
+          EXCLUDE_VALUE:   ${{ github.event.inputs.exclude_value || 'Churn,Churned' }}
           SITES_PER_SHARD: '25'
           MAX_SHARDS:      '20'
           # The plan job must see the same filter the shards will, or a 4-site run
@@ -109,6 +119,8 @@ jobs:
           SCRIPT_COL:       ${{ github.event.inputs.script_col || 'M' }}
           FILTER_COL:       ${{ github.event.inputs.filter_col }}
           FILTER_VALUE:     ${{ github.event.inputs.filter_value }}
+          EXCLUDE_COL:      ${{ github.event.inputs.exclude_col || 'X' }}
+          EXCLUDE_VALUE:    ${{ github.event.inputs.exclude_value || 'Churn,Churned' }}
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
           TIMEZONE:         America/New_York

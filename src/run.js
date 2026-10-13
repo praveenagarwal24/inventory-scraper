@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-10-06-filter-1';
+const RUNNER_VERSION = '2026-10-14-exclude-churned';
 
 // ---------------------------------------------------------------- config
 
@@ -29,6 +29,8 @@ const CFG = {
   scriptCol:    env('SCRIPT_COL') || 'M',
   filterCol:    env('FILTER_COL') || '',       // optional: only rows where
   filterValue:  env('FILTER_VALUE') || '',     // this column matches are scraped
+  excludeCol:   env('EXCLUDE_COL') || 'X',     // optional: drop rows whose Stage (col X)
+  excludeValue: env('EXCLUDE_VALUE') || 'Churn,Churned', // matches any of these are skipped
   nameCol:      env('NAME_COL') || '',
   proxyCol:     env('PROXY_COL') || '',        // optional per-site proxy column
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
@@ -169,6 +171,10 @@ async function loadRows() {
   const wanted = CFG.filterValue
     ? CFG.filterValue.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean)
     : [];
+  const xI = CFG.excludeValue ? colIndex(CFG.excludeCol) : -1;
+  const unwanted = CFG.excludeValue
+    ? CFG.excludeValue.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean)
+    : [];
   const nI = CFG.nameCol ? colIndex(CFG.nameCol) : -1;
   const pI = CFG.proxyCol ? colIndex(CFG.proxyCol) : -1;
 
@@ -183,12 +189,17 @@ async function loadRows() {
   }));
 
   const usable = [];
-  const skipped = { noScript: 0, noUrl: 0, badUrl: [], filtered: 0 };
+  const skipped = { noScript: 0, noUrl: 0, badUrl: [], filtered: 0, excluded: 0 };
   for (const r of all) {
     // Optional row filter, e.g. only rows whose column S reads "Active".
     if (fI >= 0 && wanted.length) {
       const cell = String(r.raw[fI] == null ? '' : r.raw[fI]).trim().toLowerCase();
       if (wanted.indexOf(cell) === -1) { skipped.filtered++; continue; }
+    }
+    // Optional row exclusion, e.g. drop rows whose Stage (col X) is "Churned".
+    if (xI >= 0 && unwanted.length) {
+      const cell = String(r.raw[xI] == null ? '' : r.raw[xI]).trim().toLowerCase();
+      if (cell && unwanted.indexOf(cell) !== -1) { skipped.excluded++; continue; }
     }
     const hasScript = /^https?:\/\//i.test(r.scriptLink);
     if (!hasScript) { if (r.rawUrl) skipped.noScript++; continue; }
@@ -221,6 +232,9 @@ async function loadRows() {
   if (fixed) console.log(`Added https:// to ${fixed} URL(s) written without a scheme`);
   if (skipped.filtered) {
     console.log(`Filter ${CFG.filterCol}="${CFG.filterValue}" excluded ${skipped.filtered} row(s)`);
+  }
+  if (skipped.excluded) {
+    console.log(`Exclude ${CFG.excludeCol}="${CFG.excludeValue}" dropped ${skipped.excluded} row(s)`);
   }
   if (skipped.noScript) console.log(`Skipped ${skipped.noScript} row(s) with a URL but no script link`);
   if (skipped.noUrl) console.log(`Skipped ${skipped.noUrl} row(s) with a script but no URL`);
