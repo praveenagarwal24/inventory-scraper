@@ -176,6 +176,9 @@ jobs:
       # Slack session tokens as the qc-hold bot (work from GitHub's cloud IP).
       - name: Notify Slack
         if: success()
+        # A Slack hiccup (e.g. expired session token) must never fail the run -
+        # the scrape and lots already succeeded. It logs a warning instead.
+        continue-on-error: true
         env:
           SLACK_XOXC:      ${{ secrets.SLACK_XOXC }}
           SLACK_XOXD:      ${{ secrets.SLACK_XOXD }}
