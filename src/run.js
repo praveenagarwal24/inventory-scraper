@@ -17,7 +17,7 @@ let puppeteer = null;   // loaded on demand; the planning pass does not need it
 
 // Printed at the top of every run. If the log does not show the version you just
 // pasted, GitHub is running an older copy of this file.
-const RUNNER_VERSION = '2026-10-14-segment-folders';
+const RUNNER_VERSION = '2026-10-15-teamid-backfill';
 
 // ---------------------------------------------------------------- config
 
@@ -71,6 +71,12 @@ const CFG = {
   outDir:       path.resolve(env('OUT_DIR') || 'out'),
   failOnError:  env('FAIL_ON_ERROR') === '1',
   batch:        env('BATCH') || process.env.GITHUB_RUN_NUMBER || String(Date.now()),
+  // team_id back-fill via Metabase card 12897 (Prod ClickHouse). Optional: if the
+  // creds are absent the back-fill is skipped and the scrape is unaffected.
+  metabaseUser: env('METABASE_USER') || '',
+  metabasePass: env('METABASE_PASS') || '',
+  metabaseBase: env('METABASE_BASE') || 'https://metabase.spyne.ai',
+  mbChDb:       int(env('MB_CH_DB'), 350),
 };
 
 function env(k, required = false) {
@@ -119,6 +125,95 @@ function parseCsv(text) {
 
 const colIndex = (letters) =>
   letters.toUpperCase().split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
+
+// ------------------------------------------------- team_id back-fill (card 12897)
+let _mbToken = null;
+async function mbToken_() {
+  if (_mbToken) return _mbToken;
+  if (!CFG.metabaseUser || !CFG.metabasePass) return null;
+  const res = await fetch(CFG.metabaseBase + '/api/session', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: CFG.metabaseUser, password: CFG.metabasePass }),
+  });
+  if (!res.ok) { console.warn('Metabase login failed:', res.status); return null; }
+  _mbToken = (await res.json()).id;
+  return _mbToken;
+}
+
+// Card 12897: given an enterprise_id and a rooftop's VINs, return the dominant team_id.
+async function resolveTeam_(token, enterpriseId, vins) {
+  if (!vins.length) return null;
+  const arr = vins.slice(0, 500).map((v) => `'${String(v).replace(/'/g, '').trim()}'`).join(',');
+  const eid = String(enterpriseId).replace(/'/g, '').trim();
+  const sql =
+    'SELECT b.team_id, b.vin_count FROM (SELECT team_id, vin_count, total_vins, sum(vin_count) OVER () AS found_vins FROM (' +
+    'WITH arrayDistinct(arrayMap(x -> upper(trimBoth(x)), [' + arr + '])) AS passed_vins ' +
+    'SELECT s.team_id AS team_id, uniqExact(upper(trimBoth(s.sku_name))) AS vin_count, any(length(passed_vins)) AS total_vins ' +
+    "FROM eventila.ai_sku AS s WHERE toString(s.enterprise_id) = '" + eid + "' " +
+    "AND has(passed_vins, upper(trimBoth(s.sku_name))) AND toString(s.is_hidden)='0' AND toString(s.is_360)='0' " +
+    'GROUP BY s.team_id)) AS b WHERE b.found_vins >= 0.05*b.total_vins AND b.vin_count > 0.5*b.found_vins ORDER BY b.vin_count DESC LIMIT 1';
+  const body = 'query=' + encodeURIComponent(JSON.stringify({ database: CFG.mbChDb, type: 'native', native: { query: sql } }));
+  const res = await fetch(CFG.metabaseBase + '/api/dataset/json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Metabase-Session': token },
+    body,
+  });
+  if (!res.ok) { console.warn('card12897 query failed:', res.status); return null; }
+  const rows = await res.json();
+  return (Array.isArray(rows) && rows[0]) ? rows[0].team_id : null;
+}
+
+function toCsv_(rows) {
+  const esc = (c) => { c = String(c == null ? '' : c); return /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c; };
+  return rows.map((r) => r.map(esc).join(',')).join('\n');
+}
+
+// Fill blank team_id cells in a scraped CSV: group rows by enterprise+rooftop,
+// resolve each rooftop's dominant team_id via card 12897, write it in. Returns the
+// CSV unchanged if the columns aren't present or Metabase is unavailable.
+async function backfillTeamIds(csv) {
+  try {
+    if (!CFG.metabaseUser) return csv;
+    const rows = parseCsv(csv);
+    if (rows.length < 2) return csv;
+    const hdr = rows[0].map((h) => String(h).trim().toLowerCase());
+    const idxOf = (names) => { for (const n of names) { const i = hdr.indexOf(n); if (i >= 0) return i; } return -1; };
+    const iTeam = idxOf(['team_id', 'teamid']);
+    const iVin  = idxOf(['vin', 'sku', 'sku_name']);
+    const iEnt  = idxOf(['enterprise_id', 'enterpriseid']);
+    const iRoof = idxOf(['rooftop', 'rooftop_name', 'dealer', 'dealer_name', 'dealership', 'location', 'store', 'branch']);
+    if (iTeam < 0 || iVin < 0 || iEnt < 0) return csv;   // not the structured format
+
+    const token = await mbToken_();
+    if (!token) return csv;
+
+    const buckets = new Map();   // enterprise|rooftop -> {ent, vins, idx}
+    for (let r = 1; r < rows.length; r++) {
+      if (String(rows[r][iTeam] || '').trim()) continue;        // already filled
+      const vin = String(rows[r][iVin] || '').trim();
+      if (!/^[A-Za-z0-9-]{6,25}$/.test(vin)) continue;
+      const ent = String(rows[r][iEnt] || '').trim();
+      if (!ent) continue;
+      const roof = iRoof >= 0 ? String(rows[r][iRoof] || '').trim() : '';
+      const key = ent + '|~|' + roof;
+      if (!buckets.has(key)) buckets.set(key, { ent, vins: [], idx: [] });
+      const b = buckets.get(key); b.vins.push(vin); b.idx.push(r);
+    }
+    if (!buckets.size) return csv;
+
+    let filled = 0;
+    for (const b of buckets.values()) {
+      const team = await resolveTeam_(token, b.ent, b.vins);
+      if (team) { b.idx.forEach((r) => { rows[r][iTeam] = team; }); filled += b.idx.length; }
+    }
+    if (!filled) return csv;
+    console.log(`  team_id back-fill: ${filled} row(s) across ${buckets.size} rooftop(s)`);
+    return toCsv_(rows);
+  } catch (e) {
+    console.warn('team_id back-fill skipped:', e.message);
+    return csv;
+  }
+}
 
 // Sheet URLs are hand-entered, so plenty arrive as "www.dealer.com" or
 // "dealer.com/inventory" with no scheme. Treat those as https rather than
@@ -935,7 +1030,11 @@ async function main() {
         used.add(fileName);
         seenHashes.set(hash, fileName);
 
-        await fsp.writeFile(path.join(CFG.outDir, fileName), useCsv, 'utf8');
+        // Fill the team_id column from each rooftop's VINs (card 12897) before the
+        // CSV goes to disk/Drive, so downstream reads it keyed by team_id.
+        const outCsv = await backfillTeamIds(useCsv);
+
+        await fsp.writeFile(path.join(CFG.outDir, fileName), outCsv, 'utf8');
 
         // A short scrape is almost certainly truncated, so it does not go to Drive.
         // The local copy stays in the run artifact if you want to look at it, and the
@@ -950,7 +1049,7 @@ async function main() {
 
         let csvUrl = '';
         try {
-          const up = await upload(fileName, useCsv, site.url, useRows, stillLow, lot, prior);
+          const up = await upload(fileName, outCsv, site.url, useRows, stillLow, lot, prior);
           csvUrl = (up && up.url) || '';
         } catch (upErr) {
           // The scrape worked; only the upload did not. Re-running the browser
