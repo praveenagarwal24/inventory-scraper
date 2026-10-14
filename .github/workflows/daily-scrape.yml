@@ -187,10 +187,12 @@ jobs:
           RUN_DATE=$(TZ=America/New_York date +%F)
           # Ask the Apps Script for the formatted message (table of files/lots/failed
           # per segment). Fall back to a plain message if it can't be built.
-          text=$(curl -sSL -X POST "$APPS_SCRIPT_URL" \
-            -H "Content-Type: application/json" \
-            --data "{\"secret\":\"$RUN_SECRET\",\"action\":\"slacktext\",\"date\":\"$RUN_DATE\"}" \
-            | jq -r '.text // empty')
+          # GET (not POST): Apps Script 302-redirects and curl -L would downgrade a
+          # POST to GET anyway, landing on the picker page. A plain GET is reliable.
+          text=$(curl -sSL -G "$APPS_SCRIPT_URL" \
+            --data-urlencode "slacktext=1" \
+            --data-urlencode "secret=$RUN_SECRET" \
+            --data-urlencode "date=$RUN_DATE")
           if [ -z "$text" ]; then
             echo "web app returned no text; using fallback message"
             text=$'Lots created, plz pick\ncc: <@U03PHN8VABB>'
