@@ -1061,7 +1061,11 @@ async function main() {
   // collects those. A run whose only failures are blocks has done its job, so it
   // should not go red.
   const realFailures = bad.filter((r) => !r.blocked);
-  if (realFailures.length && (CFG.failOnError || ok.length === 0)) process.exit(1);
+  // Only go red on an explicit FAIL_ON_ERROR, or when a NON-sharded run produced
+  // zero successes (a systemic problem). In a sharded run a single shard can draw
+  // a cluster of un-scrapable (403/Cloudflare) sites and legitimately get zero
+  // successes - that must not fail the whole workflow; those sites are logged.
+  if (realFailures.length && (CFG.failOnError || (ok.length === 0 && CFG.shardTotal <= 1))) process.exit(1);
   if (bad.length && !realFailures.length) {
     console.log('\nAll failures were IP-level blocks; leaving this run green for the pickup job.');
   }
