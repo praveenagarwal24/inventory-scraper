@@ -75,6 +75,7 @@ const CFG = {
   // creds are absent the back-fill is skipped and the scrape is unaffected.
   metabaseUser: env('METABASE_USER') || '',
   metabasePass: env('METABASE_PASS') || '',
+  metabaseToken:env('METABASE_TOKEN') || '',   // pre-fetched session (shared across shards -> 1 login)
   metabaseBase: env('METABASE_BASE') || 'https://metabase.spyne.ai',
   mbChDb:       int(env('MB_CH_DB'), 350),
 };
@@ -130,6 +131,7 @@ const colIndex = (letters) =>
 let _mbToken = null;
 async function mbToken_() {
   if (_mbToken) return _mbToken;
+  if (CFG.metabaseToken) { _mbToken = CFG.metabaseToken; return _mbToken; }   // reuse shared token, no login
   if (!CFG.metabaseUser || !CFG.metabasePass) return null;
   const res = await fetch(CFG.metabaseBase + '/api/session', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

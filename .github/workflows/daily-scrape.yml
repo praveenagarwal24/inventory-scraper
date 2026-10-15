@@ -55,11 +55,26 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      shards: ${{ steps.plan.outputs.shards }}
-      total:  ${{ steps.plan.outputs.total }}
-      sites:  ${{ steps.plan.outputs.sites }}
+      shards:   ${{ steps.plan.outputs.shards }}
+      total:    ${{ steps.plan.outputs.total }}
+      sites:    ${{ steps.plan.outputs.sites }}
+      mb_token: ${{ steps.mbtoken.outputs.token }}
     steps:
       - uses: actions/checkout@v4
+      # One Metabase login for the whole run; the token is shared with every shard
+      # (avoids ~20 "new login" emails — see team_id back-fill). Masked in logs.
+      - id: mbtoken
+        env:
+          METABASE_USER: ${{ secrets.METABASE_USER }}
+          METABASE_PASS: ${{ secrets.METABASE_PASS }}
+        run: |
+          if [ -n "$METABASE_USER" ]; then
+            TOK=$(curl -sf -X POST https://metabase.spyne.ai/api/session \
+              -H 'Content-Type: application/json' \
+              --data "{\"username\":\"$METABASE_USER\",\"password\":\"$METABASE_PASS\"}" \
+              | python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+            if [ -n "$TOK" ]; then echo "::add-mask::$TOK"; echo "token=$TOK" >> "$GITHUB_OUTPUT"; fi
+          fi
       - id: plan
         env:
           PLAN_ONLY:       '1'
@@ -122,7 +137,8 @@ jobs:
           EXCLUDE_COL:      ${{ github.event.inputs.exclude_col || 'X' }}
           EXCLUDE_VALUE:    ${{ github.event.inputs.exclude_value || 'Churn,Churned' }}
           SEG_COL:          'G'      # customer segment -> <segment>/ Drive sub-folder
-          METABASE_USER:    ${{ secrets.METABASE_USER }}   # team_id back-fill (card 12897)
+          METABASE_TOKEN:   ${{ needs.plan.outputs.mb_token }}   # shared session (1 login/run)
+          METABASE_USER:    ${{ secrets.METABASE_USER }}         # fallback if token empty
           METABASE_PASS:    ${{ secrets.METABASE_PASS }}
           APPS_SCRIPT_URL:  ${{ secrets.APPS_SCRIPT_URL }}
           RUN_SECRET:       ${{ secrets.RUN_SECRET }}
