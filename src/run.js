@@ -31,7 +31,7 @@ const CFG = {
   filterValue:  env('FILTER_VALUE') || '',     // this column matches are scraped
   excludeCol:   env('EXCLUDE_COL') || 'X',     // optional: drop rows whose Stage (col X)
   excludeValue: env('EXCLUDE_VALUE') || 'Churn,Churned', // matches any of these are skipped
-  segCol:       env('SEG_COL') || 'G',         // customer segment -> <segment>/ Drive sub-folder
+  segCol:       env('SEG_COL') || 'V',         // customer segment (Main col V) -> <segment>/ Drive sub-folder
   nameCol:      env('NAME_COL') || '',
   proxyCol:     env('PROXY_COL') || '',        // optional per-site proxy column
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',

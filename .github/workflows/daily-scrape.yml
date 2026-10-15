@@ -136,7 +136,7 @@ jobs:
           FILTER_VALUE:     ${{ github.event.inputs.filter_value }}
           EXCLUDE_COL:      ${{ github.event.inputs.exclude_col || 'X' }}
           EXCLUDE_VALUE:    ${{ github.event.inputs.exclude_value || 'Churn,Churned' }}
-          SEG_COL:          'G'      # customer segment -> <segment>/ Drive sub-folder
+          SEG_COL:          'V'      # customer segment (Main col V) -> <segment>/ Drive sub-folder
           METABASE_TOKEN:   ${{ needs.plan.outputs.mb_token }}   # shared session (1 login/run)
           METABASE_USER:    ${{ secrets.METABASE_USER }}         # fallback if token empty
           METABASE_PASS:    ${{ secrets.METABASE_PASS }}
