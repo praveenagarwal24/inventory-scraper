@@ -32,6 +32,8 @@ const CFG = {
   excludeCol:   env('EXCLUDE_COL') || 'X',     // optional: drop rows whose Stage (col X)
   excludeValue: env('EXCLUDE_VALUE') || 'Churn,Churned', // matches any of these are skipped
   segCol:       env('SEG_COL') || 'V',         // customer segment (Main col V) -> <segment>/ Drive sub-folder
+  entColSheet:  env('ENT_COL_SHEET')  || 'A',  // Main: Enterprise_Id (injected into CSVs that lack it)
+  teamColSheet: env('TEAM_COL_SHEET') || 'C',  // Main: Rooftop_Id (= team_id) fallback when card 12897 can't resolve
   nameCol:      env('NAME_COL') || '',
   proxyCol:     env('PROXY_COL') || '',        // optional per-site proxy column
   appsScriptUrl:env('APPS_SCRIPT_URL') || '',
@@ -181,43 +183,61 @@ function toCsv_(rows) {
 // Fill blank team_id cells in a scraped CSV: group rows by enterprise+rooftop,
 // resolve each rooftop's dominant team_id via card 12897, write it in. Returns the
 // CSV unchanged if the columns aren't present or Metabase is unavailable.
-async function backfillTeamIds(csv) {
+async function backfillTeamIds(csv, sheetTeam, sheetEnt) {
   try {
-    if (!CFG.metabaseUser) return csv;
     const rows = parseCsv(csv);
     if (rows.length < 2) return csv;
-    const hdr = rows[0].map((h) => String(h).trim().toLowerCase());
+    let hdr = rows[0].map((h) => String(h).trim().toLowerCase());
     const idxOf = (names) => { for (const n of names) { const i = hdr.indexOf(n); if (i >= 0) return i; } return -1; };
-    const iTeam = idxOf(['team_id', 'teamid']);
+    const addCol = (label) => { rows[0].push(label); for (let r = 1; r < rows.length; r++) rows[r].push(''); hdr = rows[0].map((h) => String(h).trim().toLowerCase()); };
+
+    // Guarantee a team_id column — some scraper formats (plain _vlp / _inventory) omit it.
+    let iTeam = idxOf(['team_id', 'teamid']);
+    if (iTeam < 0) { addCol('team_id'); iTeam = hdr.indexOf('team_id'); }
+    // Guarantee an Enterprise_Id column; fill blanks from the sheet row.
+    let iEnt = idxOf(['enterprise_id', 'enterpriseid']);
+    if (iEnt < 0) { addCol('Enterprise_Id'); iEnt = hdr.indexOf('enterprise_id'); }
+    const sTeam = String(sheetTeam || '').trim();
+    const sEnt  = String(sheetEnt  || '').trim();
+    if (sEnt) for (let r = 1; r < rows.length; r++) if (!String(rows[r][iEnt] || '').trim()) rows[r][iEnt] = sEnt;
+
     const iVin  = idxOf(['vin', 'sku', 'sku_name']);
-    const iEnt  = idxOf(['enterprise_id', 'enterpriseid']);
     const iRoof = idxOf(['rooftop', 'rooftop_name', 'dealer', 'dealer_name', 'dealership', 'location', 'store', 'branch']);
-    if (iTeam < 0 || iVin < 0 || iEnt < 0) return csv;   // not the structured format
 
-    const token = await mbToken_();
-    if (!token) return csv;
-
-    const buckets = new Map();   // enterprise|rooftop -> {ent, vins, idx}
-    for (let r = 1; r < rows.length; r++) {
-      if (String(rows[r][iTeam] || '').trim()) continue;        // already filled
-      const vin = String(rows[r][iVin] || '').trim();
-      if (!/^[A-Za-z0-9-]{6,25}$/.test(vin)) continue;
-      const ent = String(rows[r][iEnt] || '').trim();
-      if (!ent) continue;
-      const roof = iRoof >= 0 ? String(rows[r][iRoof] || '').trim() : '';
-      const key = ent + '|~|' + roof;
-      if (!buckets.has(key)) buckets.set(key, { ent, vins: [], idx: [] });
-      const b = buckets.get(key); b.vins.push(vin); b.idx.push(r);
+    // 1) Card 12897 resolution for blank team_id rows (needs VIN + enterprise + creds).
+    let filled = 0, buckets = new Map();
+    if (CFG.metabaseUser && iVin >= 0) {
+      for (let r = 1; r < rows.length; r++) {
+        if (String(rows[r][iTeam] || '').trim()) continue;        // already filled
+        const vin = String(rows[r][iVin] || '').trim();
+        if (!/^[A-Za-z0-9-]{6,25}$/.test(vin)) continue;
+        const ent = String(rows[r][iEnt] || '').trim();
+        if (!ent) continue;
+        const roof = iRoof >= 0 ? String(rows[r][iRoof] || '').trim() : '';
+        const key = ent + '|~|' + roof;
+        if (!buckets.has(key)) buckets.set(key, { ent, vins: [], idx: [] });
+        const b = buckets.get(key); b.vins.push(vin); b.idx.push(r);
+      }
+      if (buckets.size) {
+        const token = await mbToken_();
+        if (token) for (const b of buckets.values()) {
+          const team = await resolveTeam_(token, b.ent, b.vins);
+          if (team) { b.idx.forEach((r) => { rows[r][iTeam] = team; }); filled += b.idx.length; }
+        }
+      }
     }
-    if (!buckets.size) return csv;
 
-    let filled = 0;
-    for (const b of buckets.values()) {
-      const team = await resolveTeam_(token, b.ent, b.vins);
-      if (team) { b.idx.forEach((r) => { rows[r][iTeam] = team; }); filled += b.idx.length; }
+    // 2) Fallback: for a SINGLE-rooftop file, any row card 12897 couldn't resolve
+    //    gets the sheet's Rooftop_Id (= team_id). Skip multi-rooftop (group) files so
+    //    siblings aren't mislabelled — those rely on card 12897 per rooftop.
+    const roofs = iRoof >= 0 ? new Set(rows.slice(1).map((r) => String(r[iRoof] || '').trim()).filter(Boolean)) : new Set();
+    let fromSheet = 0;
+    if (sTeam && roofs.size <= 1) {
+      for (let r = 1; r < rows.length; r++) if (!String(rows[r][iTeam] || '').trim()) { rows[r][iTeam] = sTeam; fromSheet++; }
     }
-    if (!filled) return csv;
-    console.log(`  team_id back-fill: ${filled} row(s) across ${buckets.size} rooftop(s)`);
+
+    if (!filled && !fromSheet) return toCsv_(rows);   // columns may still have been added
+    console.log(`  team_id: ${filled} via card 12897 (${buckets.size} rooftop) + ${fromSheet} from sheet`);
     return toCsv_(rows);
   } catch (e) {
     console.warn('team_id back-fill skipped:', e.message);
@@ -284,6 +304,8 @@ async function loadRows() {
   const nI = CFG.nameCol ? colIndex(CFG.nameCol) : -1;
   const pI = CFG.proxyCol ? colIndex(CFG.proxyCol) : -1;
   const gI = CFG.segCol ? colIndex(CFG.segCol) : -1;
+  const eI = CFG.entColSheet ? colIndex(CFG.entColSheet) : -1;    // Enterprise_Id (Main col A)
+  const tI = CFG.teamColSheet ? colIndex(CFG.teamColSheet) : -1;  // Rooftop_Id = team_id (Main col C)
 
   const all = rawRows.map((r, i) => ({
     rowNumber: i + 1,
@@ -294,6 +316,8 @@ async function loadRows() {
     proxy: (pI >= 0 ? (r[pI] || '') : '').trim() || CFG.proxyUrl,
     // Customer segment -> Drive sub-folder. Blank/unknown/#N/A becomes "Others".
     segment: cleanSegment(gI >= 0 ? r[gI] : ''),
+    entId:  (eI >= 0 ? String(r[eI] || '') : '').trim(),   // from the sheet, for CSVs missing Enterprise_Id
+    teamId: (tI >= 0 ? String(r[tI] || '') : '').trim(),   // from the sheet, team_id fallback
     raw: r,
   }));
 
@@ -1040,9 +1064,10 @@ async function main() {
         used.add(fileName);
         seenHashes.set(hash, fileName);
 
-        // Fill the team_id column from each rooftop's VINs (card 12897) before the
-        // CSV goes to disk/Drive, so downstream reads it keyed by team_id.
-        const outCsv = await backfillTeamIds(useCsv);
+        // Fill the team_id column (card 12897 by VINs; sheet Rooftop_Id as fallback)
+        // and guarantee the team_id/Enterprise_Id columns exist, so EVERY CSV —
+        // including plain _vlp/_inventory formats — is readable keyed by team_id.
+        const outCsv = await backfillTeamIds(useCsv, site.teamId, site.entId);
 
         await fsp.writeFile(path.join(CFG.outDir, fileName), outCsv, 'utf8');
 
