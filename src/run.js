@@ -127,6 +127,14 @@ function parseCsv(text) {
 const colIndex = (letters) =>
   letters.toUpperCase().split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
 
+// Customer-segment value -> a clean Drive sub-folder name. Blank, #N/A, N/A, "-",
+// none, tbd (and the #N-A folder form) all collapse to "Others".
+function cleanSegment(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s || /^#?\s*n\/?-?a$/i.test(s) || s === '-' || /^(none|tbd|null)$/i.test(s)) return 'Others';
+  return s;
+}
+
 // ------------------------------------------------- team_id back-fill (card 12897)
 let _mbToken = null;
 async function mbToken_() {
@@ -284,8 +292,8 @@ async function loadRows() {
     url: normaliseUrl(r[uI]),
     scriptLink: (r[sI] || '').trim(),
     proxy: (pI >= 0 ? (r[pI] || '') : '').trim() || CFG.proxyUrl,
-    // Customer segment -> Drive sub-folder. Blank/unknown becomes "Others".
-    segment: (gI >= 0 ? String(r[gI] || '').trim() : '') || 'Others',
+    // Customer segment -> Drive sub-folder. Blank/unknown/#N/A becomes "Others".
+    segment: cleanSegment(gI >= 0 ? r[gI] : ''),
     raw: r,
   }));
 
