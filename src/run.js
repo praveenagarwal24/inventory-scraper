@@ -821,7 +821,22 @@ async function main() {
     if (!CFG.appsScriptUrl) { console.error('APPS_SCRIPT_URL is not set.'); process.exit(2); }
     let movedTotal = 0;
     for (let call = 1; call <= 12; call++) {
-      const r = await postToWebApp({ secret: CFG.runSecret, action: 'lots', date: RUN_DATE });
+      // handleLots holds a script lock for up to ~4 min while packing, but
+      // postToWebApp only retries for ~7.5s — so an overlapping pass used to get
+      // "lots busy" and kill the whole run. Wait the lock out here (up to ~5 min
+      // per pass) before giving up, so a transient lock never fails the run.
+      let r;
+      for (let busy = 1; ; busy++) {
+        try { r = await postToWebApp({ secret: CFG.runSecret, action: 'lots', date: RUN_DATE }); break; }
+        catch (e) {
+          if (/busy|try again|lock/i.test(e.message) && busy <= 10) {
+            console.log(`pass ${call}: lots busy (lock held) — waiting 30s then retrying [${busy}/10]`);
+            await sleep(30000);
+            continue;
+          }
+          throw e;
+        }
+      }
       movedTotal += r.moved || 0;
       console.log(`pass ${call}: moved ${r.moved || 0}, ${r.remaining || 0} left, ${r.lots || 0} lot(s)`);
       if (r.errors && r.errors.length) r.errors.forEach((e) => console.warn(`  ${e}`));
