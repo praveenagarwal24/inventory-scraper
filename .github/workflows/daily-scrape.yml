@@ -1,12 +1,11 @@
 name: Daily inventory scrape
 
 on:
-  # Primary schedule: run daily at 17:00 IST. GitHub cron is in UTC, so
-  # 11:30 UTC = 17:00 IST. This replaces the drop-box Apps Script time-trigger
-  # (which depended on a GitHub PAT that expired → silent dispatch failures).
-  # GitHub cron can lag a few minutes under load; that's fine for a daily job.
-  schedule:
-    - cron: '30 11 * * *'
+  # Scheduling is driven by the "Inventory CSV Drop" Apps Script scheduledRun
+  # trigger (17:00 IST daily), which dispatches this workflow via the GitHub API
+  # using its GITHUB_TOKEN script property. (A GitHub-native cron was tried but
+  # GitHub delayed it by hours — see 2026-11-11 — so we rely on the Apps Script
+  # trigger for on-time 5 PM runs. Keep that PAT non-expiring.)
   workflow_dispatch:
     inputs:
       only:
@@ -173,9 +172,7 @@ jobs:
           # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
           ONLY:             ${{ github.event.inputs.only }}
           LIMIT:            ${{ github.event.inputs.limit }}
-          # Scheduled runs force a full re-scrape (matches the old scheduledRun,
-          # which always dispatched with force=true). Manual runs honour the input.
-          SKIP_EXISTING:    ${{ (github.event_name == 'schedule' || github.event.inputs.force == 'true') && '0' || '1' }}
+          SKIP_EXISTING:    ${{ github.event.inputs.force == 'true' && '0' || '1' }}
           MAX_MINUTES:      '0'
         run: node src/run.js
 
