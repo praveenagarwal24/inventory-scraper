@@ -1,14 +1,12 @@
 name: Daily inventory scrape
 
 on:
-  # Self-running schedule via GitHub-native cron — needs NO token, so it keeps
-  # working even though the Apps Script trigger's GITHUB_TOKEN PAT expired.
-  # 11:30 UTC = 17:00 IST (IST has no DST). NOTE: GitHub can delay scheduled
-  # runs (observed firing several hours late), so the exact time isn't
-  # guaranteed — but it WILL run unattended every day. For on-time 5 PM, the
-  # Apps Script trigger + a non-expiring PAT is the only reliable option.
-  schedule:
-    - cron: '30 11 * * *'
+  # Scheduling is driven by the "Inventory CSV Drop" Apps Script scheduledRun
+  # trigger (17:00 IST daily), which dispatches this workflow via the GitHub API
+  # using its GITHUB_TOKEN script property (a CLASSIC, no-expiration PAT as of
+  # 2026-11-16 — the previous fine-grained PAT expired and silently broke this).
+  # No GitHub-native cron: it was tried but fired hours late, and would double-run
+  # alongside the on-time Apps Script trigger.
   workflow_dispatch:
     inputs:
       only:
@@ -175,8 +173,7 @@ jobs:
           # PROXY_URL:      ${{ secrets.PROXY_URL }}   # uncomment for geo-restricted sites
           ONLY:             ${{ github.event.inputs.only }}
           LIMIT:            ${{ github.event.inputs.limit }}
-          # Scheduled (cron) runs force a full re-scrape, like the old scheduledRun.
-          SKIP_EXISTING:    ${{ (github.event_name == 'schedule' || github.event.inputs.force == 'true') && '0' || '1' }}
+          SKIP_EXISTING:    ${{ github.event.inputs.force == 'true' && '0' || '1' }}
           MAX_MINUTES:      '0'
         run: node src/run.js
 
